@@ -274,23 +274,28 @@ def match_squad_neighborhood(matcher, panel, expected_position):
     """将低重合度的展开图限制在新测小队圆环附近重配准，返回该范围内的证据。
 
     expected_position 必须是本次移动后已确认且仍有效的底图坐标。范围按原始展开 ROI 的像素给出，
-    变换仍使用完整面板坐标系。小队坐标约束与道路匹配均须通过，圈外的道路和敌人不属于本次证据。
+    变换仍使用完整面板坐标系。较宽窗口有道路形状不一致时，可缩小到圆环附近的高置信区域。
+    两个窗口采用相同置信门限，圈外的道路和敌人不属于本次证据。
     """
     try:
         road, valid, player = expanded_minimap_masks(panel)
-        center_x, center_y = map(int, np.rint(player))
-        height, width = panel.shape[:2]
-        left, top = max(4, center_x - 125), max(4, center_y - 115)
-        right, bottom = min(width - 4, center_x + 125), min(height - 4, center_y + 115)
+    except (ValueError, cv2.error):
+        return None
+    center_x, center_y = map(int, np.rint(player))
+    height, width = panel.shape[:2]
+    for half_width, top_span, bottom_span in ((125, 115, 115), (85, 105, 65)):
+        left, top = max(4, center_x - half_width), max(4, center_y - top_span)
+        right, bottom = min(width - 4, center_x + half_width), min(height - 4, center_y + bottom_span)
         local_road, local_valid = np.zeros_like(road), np.zeros_like(valid)
         area = np.s_[top:bottom, left:right]
         local_road[area], local_valid[area] = road[area], valid[area]
-        result = matcher.match_panel(panel, local_road, local_valid, player, expected_position=expected_position)
-    except (ValueError, cv2.error):
-        return None
-    if result['status'] != 'accepted' or result['road_iou'] < .85:
-        return None
-    return dict(result, coverage_bounds=[left, top, right, bottom])
+        try:
+            result = matcher.match_panel(panel, local_road, local_valid, player, expected_position=expected_position)
+        except (ValueError, cv2.error):
+            continue
+        if result['status'] == 'accepted' and result['road_iou'] >= .85:
+            return dict(result, coverage_bounds=[left, top, right, bottom])
+    return None
 
 
 def normal_enemy_markers(image, matrix, mode):
