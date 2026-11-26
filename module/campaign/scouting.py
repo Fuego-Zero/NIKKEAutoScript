@@ -35,25 +35,27 @@ def scouted_step_clear(state, cut, squad, step, route):
             and route_enemy(state, cut, squad, point, *route) is None)
 
 
-def revalidate_scouted_step(state, cut, squad, step):
+def revalidate_scouted_step(state, cut, squad, step, *, accepts_position=None):
     """由展开地图实测位置复核短移，必要时返回同一路段上更近的落点和直线距离。
 
     底图拐角处几像素的配准差异就可能使原直线擦出道路。仅在原短移仍符合距离和可达门限时
-    沿当前 A* 路径向近处查找，并对每个落点完整复核道路与敌人。没有合格落点时返回 None。
+    沿当前 A* 路径向近处查找，并对每个落点完整复核道路与敌人。accepts_position 可额外限定
+    此次实测配准的可信覆盖区，接收底图坐标。没有合格落点时返回 None。
     """
     target = np.asarray(step['position'], float)
     span = float(np.linalg.norm(target - squad))
     route = route_path(cut, squad, target)
     if not 40. <= span <= 125. or route is None or route[1][-1] > 130.:
         return None
-    if scouted_step_clear(state, cut, squad, step, route):
+    if (accepts_position is None or accepts_position(target)) and scouted_step_clear(state, cut, squad, step, route):
         return target, span
     path, distances = route
     for index in range(len(path) - 2, -1, -1):
         point = path[index]
         distance = float(np.linalg.norm(point - squad))
-        if 40. <= distance < span and scouted_step_clear(
-                state, cut, squad, dict(step, position=point.tolist()), (path[:index + 1], distances[:index + 1])):
+        if (40. <= distance < span and (accepts_position is None or accepts_position(point))
+                and scouted_step_clear(state, cut, squad, dict(step, position=point.tolist()),
+                                       (path[:index + 1], distances[:index + 1]))):
             return point, distance
     return None
 

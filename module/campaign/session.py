@@ -780,7 +780,18 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         if observation.get('player_roi') is None:
             raise ValueError('已确认道路短移前缺少本次展开地图的实测圆环。')
         squad = np.asarray(observation['position'], float)
-        step = revalidate_scouted_step(self.owner.state, self.owner.cut, squad, goal)
+        bounds = observation.get('coverage_bounds')
+        accepts_position = None
+        if bounds is not None:
+            inverse = np.linalg.inv(np.asarray(observation['roi_to_map'], float))
+
+            def in_coverage(point):
+                """判断底图落点是否仍在本次展开配准的可信区域内。"""
+                return inside(project(inverse, point), bounds)
+
+            accepts_position = in_coverage
+        step = revalidate_scouted_step(self.owner.state, self.owner.cut, squad, goal,
+                                       accepts_position=accepts_position)
         if step is None:
             raise ValueError('实测位置已改变或短移道路仍需复核，未发送移动。')
         target, span = step
@@ -791,7 +802,6 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         anchor = resolve_anchor(self, field, observation, allow_scene=False)
         chart = field_chart(self.localizer, observation, anchor)
         roi, click = target_projection(chart, observation, target)
-        bounds = observation.get('coverage_bounds')
         if (not inside(roi, (14, 14, 472, 448)) or not inside(click, FIELD_BOUNDS)
                 or (bounds is not None and not inside(roi, bounds))):
             raise ValueError('已确认道路短移的投影落点超出当前有效画面。')
