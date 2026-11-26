@@ -35,6 +35,29 @@ def scouted_step_clear(state, cut, squad, step, route):
             and route_enemy(state, cut, squad, point, *route) is None)
 
 
+def revalidate_scouted_step(state, cut, squad, step):
+    """由展开地图实测位置复核短移，必要时返回同一路段上更近的落点和直线距离。
+
+    底图拐角处几像素的配准差异就可能使原直线擦出道路。仅在原短移仍符合距离和可达门限时
+    沿当前 A* 路径向近处查找，并对每个落点完整复核道路与敌人。没有合格落点时返回 None。
+    """
+    target = np.asarray(step['position'], float)
+    span = float(np.linalg.norm(target - squad))
+    route = route_path(cut, squad, target)
+    if not 40. <= span <= 125. or route is None or route[1][-1] > 130.:
+        return None
+    if scouted_step_clear(state, cut, squad, step, route):
+        return target, span
+    path, distances = route
+    for index in range(len(path) - 2, -1, -1):
+        point = path[index]
+        distance = float(np.linalg.norm(point - squad))
+        if 40. <= distance < span and scouted_step_clear(
+                state, cut, squad, dict(step, position=point.tolist()), (path[:index + 1], distances[:index + 1])):
+            return point, distance
+    return None
+
+
 def confirmed_route_step(state, cut, squad, goal, pending):
     """远处侦察有待复核时，只选当前路线上已确认的一小段路。
 

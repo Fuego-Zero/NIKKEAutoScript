@@ -770,8 +770,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
             FIELD_BOUNDS, SquadOffscreen, field_chart, inside, target_projection,
         )
         from module.campaign.navigation.movement_feedback import resolve_anchor
-        from module.campaign.route_planning import route_path
-        from module.campaign.scouting import scouted_step_clear
+        from module.campaign.scouting import revalidate_scouted_step
 
         if self.ex_bypass.obstacles:
             raise ValueError('已确认道路短移前仍有 EX 避让任务，需重新规划。')
@@ -781,13 +780,10 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         if observation.get('player_roi') is None:
             raise ValueError('已确认道路短移前缺少本次展开地图的实测圆环。')
         squad = np.asarray(observation['position'], float)
-        target = np.asarray(goal['position'], float)
-        span = float(np.linalg.norm(target - squad))
-        state, cut = self.owner.state, self.owner.cut
-        route = route_path(cut, squad, target)
-        if (not 40. <= span <= 125. or route is None or route[1][-1] > 130.
-                or not scouted_step_clear(state, cut, squad, goal, route)):
+        step = revalidate_scouted_step(self.owner.state, self.owner.cut, squad, goal)
+        if step is None:
             raise ValueError('实测位置已改变或短移道路仍需复核，未发送移动。')
+        target, span = step
         goto.map_close(self.win)
         field = self.win.client()
         self.identity(field)
@@ -802,7 +798,8 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         self.prepare_move_progress(observation, target, click)
         logger.info(f'按展开地图实测定位执行短移：小队 {points_text(squad)}，'
                     f'道路目标 {points_text(target)}，客户区落点 {points_text(click)}。')
-        self.record('scouted_step_click', field=field, goal=goal, squad=squad.tolist(), click=click.tolist())
+        self.record('scouted_step_click', field=field, goal=goal, squad=squad.tolist(),
+                    click=click.tolist(), target=target.tolist())
         self.move(click)
         try:
             self.wait_stopped()
