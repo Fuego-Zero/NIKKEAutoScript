@@ -11,12 +11,13 @@ from scipy.sparse.csgraph import dijkstra
 from module.campaign.goals import nearest_enemy
 from module.campaign.map.map_state import GRID
 from module.campaign.navigation.ex_bypass import segment_clear
-from module.campaign.route_planning import route_enemy, route_enemy_candidates, route_path
+from module.campaign.route_planning import ADVANCE_DISTANCE, route_enemy, route_enemy_candidates, route_path
 from module.campaign.run_state import OBSERVED_CELL
 
 # 一个已观测粗格每边包含的 8 像素路网格数。
 CELLS = OBSERVED_CELL // GRID
 MIN_SCOUTED_STEP_DISTANCE = 60.
+FAR_ENEMY_DISTANCE = 3 * ADVANCE_DISTANCE
 
 
 def scouted_step_clear(state, cut, squad, step, route):
@@ -60,6 +61,38 @@ def confirmed_route_step(state, cut, squad, goal, pending):
                     for_target=goal.get('for_target', goal['id']), scouted_step=True)
         if not state.is_unavailable(identifier) and scouted_step_clear(
                 state, cut, squad, step, (path[:index + 1], distances[:index + 1])):
+            return step
+    return None
+
+
+def far_enemy_approach(state, cut, squad, goal):
+    """为超出常规镜头范围的普通敌人选择中途道路落点。
+
+    镜头开销按底图直线距离判断，落点沿切开图的实际步行路程取一个常规推进段。
+    普通到点导航可沿道路绕过转角，因此只派发沿途已确认、无前置敌人的落点。
+    通过中途落点后重新决策，保留远处敌人的未完成状态。
+    """
+    if (goal is None or goal['kind'] != 'enemy' or goal.get('enemy_kind') != 'normal'
+            or np.linalg.norm(np.subtract(goal['position'], squad)) <= FAR_ENEMY_DISTANCE):
+        return None
+    route = route_path(cut, squad, goal['position'])
+    if route is None:
+        return None
+    path, distances = route
+    indices = np.flatnonzero((distances >= MIN_SCOUTED_STEP_DISTANCE) & (distances <= ADVANCE_DISTANCE))
+    for index in indices[::-1]:
+        point = path[index]
+        identifier = f'advance-{goal["id"]}-{int(point[0])}-{int(point[1])}'
+        if state.is_unavailable(identifier):
+            continue
+        prefix = path[:index + 1]
+        if (not all(state.is_enemy_observed(cell) for cell in prefix)
+                or route_enemy(state, cut, squad, point, prefix, distances[:index + 1]) is not None):
+            continue
+        step = dict(kind='advance', id=identifier, position=point.tolist(),
+                    distance=round(float(distances[index]), 1), reason='advance_on_route',
+                    for_target=goal['id'])
+        if route_scout_focus(state, cut, squad, step, include_unavailable=True) is None:
             return step
     return None
 
