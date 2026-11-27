@@ -567,6 +567,7 @@ def plan_world_move_compact(session, observation, target, max_pans=12, batch_lim
     from module.campaign.vision.enemy_direction import match_target_direction
 
     session.last_plan_enemy_ring = False
+    session.last_stalled_enemy_camera = None
     target = np.asarray(target, float)
     squad_position = np.asarray(observation['position'], float)
     viewport_only = observation.get('minimap_mode') == 'compact' or observation.get('squad_source') == 'known'
@@ -612,6 +613,7 @@ def plan_world_move_compact(session, observation, target, max_pans=12, batch_lim
     ring_pan, ring_scale, ring_path = 0, scale_a, 0.
     ring_trusted = start['status'] == 'accepted'
     gain, responses, stalled, batch_pans = 1., [], 0, 0
+    previously_unmoved = False
     session.camera_pans = getattr(session, 'camera_pans', 0)
     for count in range(max_pans + 1):
         session.check()
@@ -777,6 +779,7 @@ def plan_world_move_compact(session, observation, target, max_pans=12, batch_lim
             session.emit(message=f'脚圈辅助跳过本帧：镜头定位 {label(CAMERA_TRACKING, source)}；{retained}')
         response = float(actual @ commanded_delta) / float(commanded_delta @ commanded_delta)
         session.emit(camera_tracking=source, camera_response=response, camera_batch_pans=batch_pans)
+        unmoved = source == 'accepted' and np.linalg.norm(actual) <= 3.
         if .2 <= response <= 3.:
             responses.append(response)
             gain = float(np.median(responses[-3:]))
@@ -786,7 +789,10 @@ def plan_world_move_compact(session, observation, target, max_pans=12, batch_lim
         else:
             stalled += 1
             if stalled >= 2:
+                if enemy_assist and enemy_kind == 'normal' and unmoved and previously_unmoved:
+                    session.last_stalled_enemy_camera = dict(target=target.tolist(), squad=squad_position.tolist())
                 raise ValueError('连续两次平移没有产生有效位移；未发送移动点击。')
+        previously_unmoved = unmoved
         matrix, scale_a = use_matrix, use_a
         road_prev = road
         session.camera_pans += 1

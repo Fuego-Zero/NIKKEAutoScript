@@ -1185,6 +1185,16 @@ class CampaignExecutor:
                                     'goal': goal, 'focus': pending}
                         logger.info(f"前置道路尚未确认（{pending['id']}），小队保持原位，下一轮继续侦察。")
                         continue
+                    stalled_camera = getattr(self.session, 'last_stalled_enemy_camera', None)
+                    if (stalled_camera is not None and self.purpose == 'story'
+                            and located(snapshot) and snapshot.get('squad') is not None):
+                        step = confirmed_route_step(self.owner.state, self.owner.cut, snapshot['squad'], goal, None,
+                                                    stalled_camera=stalled_camera)
+                        if step is not None:
+                            self.session.last_stalled_enemy_camera = None
+                            logger.info(f"普通敌人 {goal['id']} 的镜头未移动，改沿已确认道路短移至 "
+                                        f"{points_text(step['position'])}。")
+                            goal = step
                     if (goal is not None and goal['kind'] == 'enemy' and goal.get('enemy_kind') == 'boss'):
                         goal, snapshot = self.terminal_precheck(goal, snapshot)
                         if goal is None:

@@ -10,6 +10,7 @@ from scipy.sparse.csgraph import dijkstra
 
 from module.campaign.goals import nearest_enemy
 from module.campaign.map.map_state import GRID
+from module.campaign.navigation.controls import SQUAD_REACH
 from module.campaign.navigation.ex_bypass import segment_clear
 from module.campaign.route_planning import route_enemy, route_enemy_candidates, route_path
 from module.campaign.run_state import OBSERVED_CELL
@@ -36,22 +37,30 @@ def scouted_step_clear(state, cut, squad, step, route):
             and route_enemy(state, cut, squad, point, *route) is None)
 
 
-def confirmed_route_step(state, cut, squad, goal, pending):
+def confirmed_route_step(state, cut, squad, goal, pending, *, stalled_camera=None):
     """前置侦察有待复核时，选疑点之前一段已确认的道路。
 
     落点必须在同一分区内且能从小队位置沿直线路面到达。已有敌人、历史线索或缺少安全
     视野的道路仍要求按原路径复核。疑点距离沿当前路线计算，即使离小队不足常规推进距离，
-    也可选尚未到达疑点的短移落点，侦察失败记录继续保留。
+    也可选尚未到达疑点的短移落点，侦察失败记录继续保留。连续两次可靠配准确认镜头未移动时，
+    原小队与普通敌人坐标仍一致才允许沿已核验路段靠近；落点须留出至少一个到点容差。
     """
-    if (goal is None or goal.get('position') is None or goal['kind'] not in ('enemy', 'explore', 'story', 'advance')
-            or pending is None or pending['distance'] <= MIN_SCOUTED_STEP_DISTANCE):
+    if goal is None or goal.get('position') is None or goal['kind'] not in ('enemy', 'explore', 'story', 'advance'):
+        return None
+    if pending is None:
+        if (stalled_camera is None or goal['kind'] != 'enemy' or goal.get('enemy_kind') != 'normal'
+                or np.linalg.norm(np.subtract(stalled_camera['target'], goal['position'])) > 25.
+                or np.linalg.norm(np.subtract(stalled_camera['squad'], squad)) > 12.):
+            return None
+    elif pending['distance'] <= MIN_SCOUTED_STEP_DISTANCE:
         return None
     route = route_path(cut, squad, goal['position'])
     if route is None:
         return None
     path, distances = route
+    stop_distance = pending['distance'] if pending is not None else distances[-1] - SQUAD_REACH
     candidates = np.flatnonzero((distances >= MIN_SCOUTED_STEP_DISTANCE) & (distances <= 105.)
-                                & (distances < pending['distance']))
+                                & (distances < stop_distance))
     for index in candidates[::-1]:
         point = path[index]
         identifier = f'advance-{goal["id"]}-{int(point[0])}-{int(point[1])}'
