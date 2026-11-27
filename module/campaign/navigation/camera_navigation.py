@@ -488,6 +488,7 @@ def confirm_ring_click(session, matcher, reference, field, viewport, scale_a, ta
     from module.campaign.navigation.movement_feedback import ClickUnconfirmed
     from module.campaign.vision.enemy_ring import observe_rings, track_confirmed_ring
 
+    ring_options = {'boss_pedestal': True} if enemy_kind == 'boss' else {}
     fresh = goto.capture_client(session.win)
     session.identity(fresh)
     session.check_collectible(fresh)
@@ -501,7 +502,8 @@ def confirm_ring_click(session, matcher, reference, field, viewport, scale_a, ta
         if shift > 12 or scale_change > .12:
             raise ValueError(f'最新帧镜头位置或比例变化超限（镜头偏移 {shift:.1f} 地图像素，'
                              f'比例变化 {scale_change:.1%}）')
-        rings = observe_rings(fresh, panel, current['matrix'], current['viewport'], track_scene=False)
+        rings = observe_rings(fresh, panel, current['matrix'], current['viewport'],
+                              track_scene=False, **ring_options)
         result = track_confirmed_ring(reference, rings, target, squad_position, click, enemy_kind=enemy_kind)
         if result.get('click') is None:
             session.emit(message=f'脚圈目标跟踪未通过：{result["reason"]}', enemy_ring_recheck=result)
@@ -568,6 +570,7 @@ def plan_world_move_compact(session, observation, target, max_pans=12, batch_lim
 
     session.last_plan_enemy_ring = False
     session.last_stalled_enemy_camera = None
+    ring_options = {'boss_pedestal': True} if enemy_kind == 'boss' else {}
     target = np.asarray(target, float)
     squad_position = np.asarray(observation['position'], float)
     viewport_only = observation.get('minimap_mode') == 'compact' or observation.get('squad_source') == 'known'
@@ -624,7 +627,7 @@ def plan_world_move_compact(session, observation, target, max_pans=12, batch_lim
         current_rings = None
         if enemy_assist and ring_trusted:
             try:
-                current_rings = observe_rings(field, panel, matrix, viewport)
+                current_rings = observe_rings(field, panel, matrix, viewport, **ring_options)
                 result = match_target_direction(field, current_rings, matrix, target, squad_position,
                                                 enemy_kind=enemy_kind)
             except (OSError, ValueError, RuntimeError, cv2.error, np.linalg.LinAlgError) as error:
@@ -643,7 +646,7 @@ def plan_world_move_compact(session, observation, target, max_pans=12, batch_lim
         if enemy_assist and ring_trusted and ring_previous is not None:
             try:
                 current_rings = (current_rings if current_rings is not None
-                                 else observe_rings(field, panel, matrix, viewport))
+                                 else observe_rings(field, panel, matrix, viewport, **ring_options))
                 result = match_target_ring(ring_previous, current_rings, target, squad_position, goto.VIEWPORT_PIXEL,
                                            enemy_kind=enemy_kind)
             except (OSError, ValueError, RuntimeError, cv2.error, np.linalg.LinAlgError) as error:
@@ -683,7 +686,7 @@ def plan_world_move_compact(session, observation, target, max_pans=12, batch_lim
             ring_previous = None
             try:
                 ring_previous = (current_rings if current_rings is not None
-                                 else observe_rings(field, panel, matrix, viewport))
+                                 else observe_rings(field, panel, matrix, viewport, **ring_options))
                 ring_pan, ring_scale, ring_path = count, scale_a, 0.
                 session.emit(message=f'脚圈辅助参考帧已更新：平移序号 {count}，'
                                      f'可点击区域内脚圈 {len(ring_previous.centers)} 个')
@@ -789,8 +792,9 @@ def plan_world_move_compact(session, observation, target, max_pans=12, batch_lim
         else:
             stalled += 1
             if stalled >= 2:
-                if enemy_assist and enemy_kind == 'normal' and unmoved and previously_unmoved:
-                    session.last_stalled_enemy_camera = dict(target=target.tolist(), squad=squad_position.tolist())
+                if enemy_assist and enemy_kind in ('normal', 'boss') and unmoved and previously_unmoved:
+                    session.last_stalled_enemy_camera = dict(target=target.tolist(), squad=squad_position.tolist(),
+                                                             enemy_kind=enemy_kind)
                 raise ValueError('连续两次平移没有产生有效位移；未发送移动点击。')
         previously_unmoved = unmoved
         matrix, scale_a = use_matrix, use_a

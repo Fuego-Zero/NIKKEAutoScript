@@ -53,9 +53,55 @@ class RingFrame:
     viewport: np.ndarray
     enemies: list
     squad: list
+    boss_pedestal: bool = False
 
 
-def observe_rings(image, panel, matrix, viewport, observe_squad=True, track_scene=True):
+def boss_pedestal_center(image):
+    """在无常规脚圈识别时定位唯一的 Boss 传送台中心。
+
+    复核紫色椭圆内核、其两侧和下方的红色弧，以及上方红色光柱。只返回避开 HUD 的客户区坐标；
+    目标类型、路径可达性及新帧一致性仍由镜头规划和复核门槛确认。
+    """
+    from module.campaign.vision.perception import squad_arrow
+
+    arrow = squad_arrow(image)
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    purple = cv2.inRange(hsv, (125, 55, 130), (158, 255, 255))
+    purple = cv2.morphologyEx(purple, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    _, _, stats, centers = cv2.connectedComponentsWithStats(purple)
+    red = cv2.inRange(hsv, (0, 38, 165), (12, 255, 255))
+    red |= cv2.inRange(hsv, (168, 38, 165), (179, 255, 255))
+    matches = []
+    for (_, _, width, height, area), center in zip(stats[1:], centers[1:]):
+        if not 24 <= width <= 72 or not 10 <= height <= 42:
+            continue
+        covered = (arrow is not None and np.all(np.abs(arrow - center) <= [width + 8, 30]))
+        if covered:
+            if not .9 <= width / height <= 3.5 or area < .25 * width * height:
+                continue
+            # 箭头边缘会把稀疏轮廓拉宽，先按紫色实测面积限制长轴，再限制椭圆短轴。
+            width = min(width, round(np.sqrt(area / .30)))
+            height = min(height, width // 2)
+        elif not 1.5 <= width / height <= 3.5 or area < .38 * width * height:
+            continue
+        x, y = np.rint(center).astype(int)
+        rx, ry = int(width * 1.75), int(height * 1.8)
+        if y < 128 or not clickable_ring((x - rx, y - ry, x + rx, y + ry)):
+            continue
+        half_width = width // 2
+        beam = red[y - 128:y - 54, x - half_width:x + half_width]
+        if np.count_nonzero(beam) < .60 * beam.size:
+            continue
+        yy, xx = np.ogrid[-ry:ry + 1, -rx:rx + 1]
+        distance = (xx / rx) ** 2 + (yy / ry) ** 2
+        arc = (distance >= .60) & (distance <= 1.06)
+        ring = red[y - ry:y + ry + 1, x - rx:x + rx + 1] > 0
+        if all(ring[arc & side].mean() >= .35 for side in (xx < 0, xx > 0, yy >= 0)):
+            matches.append(center)
+    return matches[0] if len(matches) == 1 else None
+
+
+def observe_rings(image, panel, matrix, viewport, observe_squad=True, track_scene=True, *, boss_pedestal=False):
     """检测脚圈、紧凑小地图标记和场景纹理；只接受模型规定的客户区尺寸，不发输入。
 
     脚圈阈值至少 0.7，小地图旧类沿用自身阈值。SIFT 排除 HUD 与脚圈附近的角色动画；
@@ -63,12 +109,16 @@ def observe_rings(image, panel, matrix, viewport, observe_squad=True, track_scen
     observe_squad=False 用于纯镜头找敌人，不拟合实时小队圆环；实际移动的脚圈辅助默认保留校验。
     track_scene=False 供方向匹配和已确认目标的点击前近邻跟踪使用，不提取场景特征；
     不能用于 scene_tracks 或两帧运动匹配，方向匹配调用方仍须独立验证地图目标和道路。
+    boss_pedestal 仅供已通过战前检查的 Boss 导航及其新帧复核使用，无常规脚圈时才检查传送台。
     """
     if image.shape != (999, 1776, 3):
         raise ValueError('脚圈辅助要求 1776×999 客户区截图。')
     rings = [item for item in detect_scene(image, ('scene_enemy_ring',))
              if item.confidence >= RING_CONFIDENCE and clickable_ring(item.box)]
     centers = np.asarray([item.center for item in rings], float).reshape(-1, 2)
+    pedestal = boss_pedestal_center(image) if boss_pedestal and not len(centers) else None
+    if pedestal is not None:
+        centers = pedestal.reshape(1, 2)
     keys, descriptors = [], None
     if track_scene:
         mask = np.full(image.shape[:2], 255, np.uint8)
@@ -88,7 +138,8 @@ def observe_rings(image, panel, matrix, viewport, observe_squad=True, track_scen
         else:
             enemies.append((item.label, project(matrix, item.center)))
     return RingFrame(centers, np.asarray([key.pt for key in keys]),
-                     descriptors, np.asarray(viewport, float).copy(), enemies, squad)
+                     descriptors, np.asarray(viewport, float).copy(), enemies, squad,
+                     boss_pedestal=pedestal is not None)
 
 
 def scene_tracks(before, after):

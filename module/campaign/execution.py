@@ -917,6 +917,12 @@ class CampaignExecutor:
                     raise SceneRequired('Boss 战后已确认章节结束，交上层处理换章。')
                 self.session.verify_identity(field)
         else:
+            if goal is not None and goal.get('boss_approach'):
+                field = self.session.win.client()
+                if self.scene_controller.start_if_complete(field):
+                    self.terminal_destination = None
+                    raise SceneRequired('Boss 前短移触发的战斗已确认章节结束，交上层处理换章。')
+                self.session.verify_identity(field)
             logger.warning(f'战斗胜利但无关联敌人目标（最近执行目标：{goal_brief(goal)}），不更新敌人状态。')
         if settled == 'victory':
             self.recoveries = 0
@@ -1196,6 +1202,10 @@ class CampaignExecutor:
                                     'goal': goal, 'focus': pending}
                         logger.info(f"前置道路尚未确认（{pending['id']}），小队保持原位，下一轮继续侦察。")
                         continue
+                    if (goal is not None and goal['kind'] == 'enemy' and goal.get('enemy_kind') == 'boss'):
+                        goal, snapshot = self.terminal_precheck(goal, snapshot)
+                        if goal is None:
+                            continue
                     stalled_camera = getattr(self.session, 'last_stalled_enemy_camera', None)
                     if (stalled_camera is not None and self.purpose == 'story'
                             and located(snapshot) and snapshot.get('squad') is not None):
@@ -1203,13 +1213,11 @@ class CampaignExecutor:
                                                     stalled_camera=stalled_camera)
                         if step is not None:
                             self.session.last_stalled_enemy_camera = None
-                            logger.info(f"普通敌人 {goal['id']} 的镜头未移动，改沿已确认道路短移至 "
+                            if goal.get('enemy_kind') == 'boss':
+                                step['boss_approach'] = True
+                            logger.info(f"{goal_brief(goal)} 的镜头未移动，改沿已确认道路短移至 "
                                         f"{points_text(step['position'])}。")
                             goal = step
-                    if (goal is not None and goal['kind'] == 'enemy' and goal.get('enemy_kind') == 'boss'):
-                        goal, snapshot = self.terminal_precheck(goal, snapshot)
-                        if goal is None:
-                            continue
                     if goal is None or goal['kind'] == 'none':
                         if self.purpose == 'story':
                             raise RuntimeError(describe(goal) if goal else '无目标规划结果')
