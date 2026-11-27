@@ -415,6 +415,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
 
         冻结道路与目标由移动规划建立；敌人标记、视野或用途切换不能提供进展。
         连续无进展到上限向执行层抛 NavigationStalled，不经过回正重扫清空失败记录。
+        只有消费了新停稳位置时才返回本次路线进展，供短移识别实际前进。
         """
         progress = self.active_movement_progress
         if (progress is None or observation.get('squad_source') == 'known'
@@ -433,6 +434,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
             self.record('movement_progress', **result)
             logger.info(f"移动路线进展：阶段 {result['stage']}，剩余路程 {result['remaining']} 地图像素，"
                         f"有效推进 {result['progressed']}，连续无进展 {result['failures']} 次。")
+        return result
 
     def popup(self, field):
         """战斗闸门：弹窗、战斗中、结算与可跳过剧情都抛给执行层，接管之内放行按钮点击。
@@ -816,14 +818,20 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         except SquadOffscreen:
             self.center_for_scouted_step()
         updated = self.observe()
-        self.review_move_progress(updated)
+        progress = self.review_move_progress(updated)
         position = np.asarray(updated['position'], float)
         remaining = float(np.linalg.norm(position - target))
         state, message = 'arrived', '沿已确认道路短移后重定位成功。'
         if remaining > goto.SQUAD_REACH_WIDE or span - remaining < 24.:
-            if not passed_scouted_waypoint(self.owner.cut, squad, target, position):
+            if passed_scouted_waypoint(self.owner.cut, squad, target, position):
+                message = '停稳位置已通过短移点，下一轮从实测位置重新规划。'
+            elif (progress and progress['stage'] == 'route' and progress['progressed']
+                  and np.array_equal(progress['checkpoint'], target)
+                  and progress['previous_remaining'] - progress['remaining'] > goto.SQUAD_REACH):
+                message = '停稳位置已确认缩短短移路程，下一轮从实测位置重新规划。'
+            else:
                 raise ValueError('已确认道路的短移未到达预期区域，需重新规划。')
-            state, message = 'progressed', '停稳位置已通过短移点，下一轮从实测位置重新规划。'
+            state = 'progressed'
         self.finish_view()
         return dict(state=state, message=message, position=position.tolist(), movement_clicks=1, distance=remaining)
 
