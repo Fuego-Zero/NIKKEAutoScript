@@ -182,7 +182,7 @@ class MapMatcher:
     否则配准结果对应的是另一张图。
     """
 
-    def __init__(self, package, *, include_supplement=True):
+    def __init__(self, package, *, include_supplement=True, alternate_matching=False):
         """校验地图并构造搜索画布；有平台补图时保留一份未显示平台的配准画布。"""
         self.package = Path(package)
         meta = json.loads((self.package / 'map.json').read_text(encoding='utf-8'))
@@ -200,9 +200,13 @@ class MapMatcher:
             self.terrain = (cache['terrain_probability'] >= .5).astype(np.float32)
             if not np.allclose(cache['projection'], self.projection):
                 raise ValueError('Cached projection differs from map metadata.')
-        from module.campaign.map.edited_map import edited_roads, supplemental_terrain_edits
+        from module.campaign.map.edited_map import edited_roads, supplemental_map, supplemental_terrain_edits
         self.terrain, _, edits_digest = edited_roads(self.package, meta, self.terrain,
-                                                    include_supplement=include_supplement)
+                                                    include_supplement=include_supplement,
+                                                    alternate_matching=alternate_matching)
+        self.alternate_region = (supplemental_map(meta).get('alternate_matching', {}).get('region')
+                                 if include_supplement and not alternate_matching else None)
+        self.alternate_matcher = None
         self.terrain = self.terrain.astype(np.float32)
         self.cache_digest = hashlib.sha256((self.cache_digest + edits_digest).encode()).hexdigest()
         if list(self.terrain.shape[::-1]) != meta['size']:
@@ -222,15 +226,16 @@ class MapMatcher:
         self.local_steps = 0
         self.without_supplement = (
             MapMatcher(self.package, include_supplement=False)
-            if include_supplement and supplemental_terrain_edits(meta) else None
+            if include_supplement and not alternate_matching and supplemental_terrain_edits(meta) else None
         )
 
     def match(self, image, review=None):
         """粗搜索尺度和位移后细化最佳候选，以 IoU、远处候选分差及参数分散度联合决定是否接受。"""
         # Wiki 图片之间没有时序连续性，不能把上一张图的位置当作本张的局部搜索先验。
         self.warm_center, self.local_steps = None, 0
-        if self.without_supplement is not None:
-            self.without_supplement.warm_center, self.without_supplement.local_steps = None, 0
+        for fallback in (self.without_supplement, self.alternate_matcher):
+            if fallback is not None:
+                fallback.warm_center, fallback.local_steps = None, 0
         cropped = None
         try:
             panel, road, valid, player = minimap_masks(image)
@@ -251,6 +256,7 @@ class MapMatcher:
         """先匹配含补图的视野，失败时用原图复核实时画面是否尚未显示平台。
 
         原图复核仍使用完整接受门限和同一小队锚点；返回矩阵只用于定位，不改变带补图的路网。
+        常规补图与原图均未通过时，可在底图绑定的指定地域内用备用轮廓独立复核。
         """
         args = panel, road, valid, player, review, expected_position
         try:
@@ -263,9 +269,23 @@ class MapMatcher:
             try:
                 separate = self.without_supplement.match_panel(*args)
             except (ValueError, cv2.error):
-                return result
-            if separate['status'] == 'accepted':
+                separate = None
+            if separate is not None and separate['status'] == 'accepted':
                 return separate
+        if result['status'] != 'accepted' and self.alternate_region is not None:
+            left, top, right, bottom = self.alternate_region
+            x, y = result['position']
+            if left <= x <= right and top <= y <= bottom:
+                if self.alternate_matcher is None:
+                    self.alternate_matcher = MapMatcher(self.package,
+                                                        alternate_matching=True)
+                try:
+                    alternate = self.alternate_matcher.match_panel(*args)
+                except (ValueError, cv2.error):
+                    return result
+                x, y = alternate['position']
+                if alternate['status'] == 'accepted' and left <= x <= right and top <= y <= bottom:
+                    return dict(alternate, alternate_matching=True)
         return result
 
     def _match_panel_with_retry(self, panel, road, valid, player, review=None, expected_position=None):
