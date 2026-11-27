@@ -12,10 +12,11 @@ from module.campaign.map.terrain import render_terrain, terrain_colors
 
 
 def supplemental_map(metadata):
-    """只在底图摘要匹配时启用第 29 章的场景、步行路网和传送标注。"""
-    if metadata.get('chapter') != 29:
+    """只在底图摘要匹配时启用章节对应的道路、场景或传送补充标注。"""
+    chapter = metadata.get('chapter')
+    if chapter not in (29, 36):
         return {}
-    path = Path(__file__).resolve().parents[1] / 'assets' / 'chapter_29_terrain.json'
+    path = Path(__file__).resolve().parents[1] / 'assets' / f'chapter_{chapter}_terrain.json'
     supplement = json.loads(path.read_text(encoding='utf-8'))
     if supplement['image_sha256'] != metadata['image_sha256']:
         return {}
