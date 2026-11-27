@@ -764,7 +764,8 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         """用展开地图的实测圆环和场景箭头执行已侦察的局部路段，再核验实测移动。
 
         这一步只走一段连续、已复核的路面。展开面板提供当前小队锚点与投影，不使用未通过的紧凑
-        配准，也不外推到远处敌人。光幕或 EX 避让改变路线时交回原恢复流程。
+        配准，也不外推到远处敌人。候选落点还必须处于本次配准的有效面板和可点击场景内，
+        超出范围时在同一路线上试更近的点。光幕或 EX 避让改变路线时交回原恢复流程。
         """
         from module.campaign.navigation.camera_navigation import (
             FIELD_BOUNDS, SquadOffscreen, field_chart, inside, target_projection,
@@ -781,30 +782,28 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
             raise ValueError('已确认道路短移前缺少本次展开地图的实测圆环。')
         squad = np.asarray(observation['position'], float)
         bounds = observation.get('coverage_bounds')
-        accepts_position = None
-        if bounds is not None:
-            inverse = np.linalg.inv(np.asarray(observation['roi_to_map'], float))
-
-            def in_coverage(point):
-                """判断底图落点是否仍在本次展开配准的可信区域内。"""
-                return inside(project(inverse, point), bounds)
-
-            accepts_position = in_coverage
-        step = revalidate_scouted_step(self.owner.state, self.owner.cut, squad, goal,
-                                       accepts_position=accepts_position)
-        if step is None:
-            raise ValueError('实测位置已改变或短移道路仍需复核，未发送移动。')
-        target, span = step
         goto.map_close(self.win)
         field = self.win.client()
         self.identity(field)
         self.check_collectible(field)
         anchor = resolve_anchor(self, field, observation, allow_scene=False)
         chart = field_chart(self.localizer, observation, anchor)
-        roi, click = target_projection(chart, observation, target)
-        if (not inside(roi, (14, 14, 472, 448)) or not inside(click, FIELD_BOUNDS)
-                or (bounds is not None and not inside(roi, bounds))):
-            raise ValueError('已确认道路短移的投影落点超出当前有效画面。')
+
+        def accepts_position(point):
+            """候选点须在可信配准区域、有效面板内沿和可点击场景的交集中。"""
+            try:
+                roi, click = target_projection(chart, observation, point)
+            except ValueError:
+                return False
+            return (inside(roi, (14, 14, 472, 448)) and inside(click, FIELD_BOUNDS)
+                    and (bounds is None or inside(roi, bounds)))
+
+        step = revalidate_scouted_step(self.owner.state, self.owner.cut, squad, goal,
+                                       accepts_position=accepts_position)
+        if step is None:
+            raise ValueError('当前视野和已确认道路内没有可点击的短移落点。')
+        target, span = step
+        _, click = target_projection(chart, observation, target)
         self.prepare_move_progress(observation, target, click)
         logger.info(f'按展开地图实测定位执行短移：小队 {points_text(squad)}，'
                     f'道路目标 {points_text(target)}，客户区落点 {points_text(click)}。')
