@@ -646,10 +646,10 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         pans = 0
         for attempt in range(LOCALIZE_RETRIES + 1):
             if attempt:
-                if not recentered and isinstance(error, ExpandedSquadRingMissing) and self.stationary_squad() is not None:
+                if not recentered and isinstance(error, ExpandedSquadRingMissing):
                     from module.campaign.navigation.recovery import recenter_squad
 
-                    logger.info('纯镜头操作后展开地图未检测到小队圆环，回正并重新展开观测一次。')
+                    logger.info('展开地图未检测到小队圆环，按当前场景回正并重新展开观测一次。')
                     recenter_squad(self)
                     goto.map_open(self.win, reset=True)
                     recentered = True
