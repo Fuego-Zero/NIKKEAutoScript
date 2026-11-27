@@ -10,6 +10,7 @@ from scipy.sparse.csgraph import dijkstra
 
 from module.campaign.goals import nearest_enemy
 from module.campaign.map.map_state import GRID
+from module.campaign.navigation.controls import SQUAD_REACH
 from module.campaign.navigation.ex_bypass import segment_clear
 from module.campaign.route_planning import ADVANCE_DISTANCE, route_enemy, route_enemy_candidates, route_path
 from module.campaign.run_state import OBSERVED_CELL
@@ -84,6 +85,24 @@ def confirmed_route_step(state, cut, squad, goal, pending):
                 state, cut, squad, step, (path[:index + 1], distances[:index + 1])):
             return step
     return None
+
+
+def passed_scouted_waypoint(cut, start, waypoint, position):
+    """判断一次停稳实测是否沿当前可达道路通过了短移点，距离均为底图像素。
+
+    只接受经过短移点一个路网格范围内、随后又前进至少一个到点容差的局部路线。
+    支路、折返、远离道路的终点以及超出一次短移范围的落点仍须进入普通恢复。
+    """
+    route = route_path(cut, start, position)
+    if route is None:
+        return False
+    path, distances = route
+    if np.linalg.norm(path[-1] - position) > 2 * GRID:
+        return False
+    gaps = np.linalg.norm(path - waypoint, axis=1)
+    closest = int(np.argmin(gaps))
+    return bool(gaps[closest] <= GRID and distances[closest] <= 130.
+                and SQUAD_REACH <= distances[-1] - distances[closest] <= 72.)
 
 
 def walking_field(cut, squad):

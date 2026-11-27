@@ -770,7 +770,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
             FIELD_BOUNDS, SquadOffscreen, field_chart, inside, target_projection,
         )
         from module.campaign.navigation.movement_feedback import resolve_anchor
-        from module.campaign.scouting import revalidate_scouted_step
+        from module.campaign.scouting import passed_scouted_waypoint, revalidate_scouted_step
 
         if self.ex_bypass.obstacles:
             raise ValueError('已确认道路短移前仍有 EX 避让任务，需重新规划。')
@@ -819,11 +819,13 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         self.review_move_progress(updated)
         position = np.asarray(updated['position'], float)
         remaining = float(np.linalg.norm(position - target))
+        state, message = 'arrived', '沿已确认道路短移后重定位成功。'
         if remaining > goto.SQUAD_REACH_WIDE or span - remaining < 24.:
-            raise ValueError('已确认道路的短移未到达预期区域，需重新规划。')
+            if not passed_scouted_waypoint(self.owner.cut, squad, target, position):
+                raise ValueError('已确认道路的短移未到达预期区域，需重新规划。')
+            state, message = 'progressed', '停稳位置已通过短移点，下一轮从实测位置重新规划。'
         self.finish_view()
-        return dict(state='arrived', message='沿已确认道路短移后重定位成功。',
-                    position=position.tolist(), movement_clicks=1, distance=remaining)
+        return dict(state=state, message=message, position=position.tolist(), movement_clicks=1, distance=remaining)
 
     def confirm_barriers(self, snapshot):
         """只平移镜头确认当前可见光幕，返回已有小队坐标与新视口配准，不发送地面点击。"""
