@@ -11,11 +11,12 @@ from scipy.sparse.csgraph import dijkstra
 from module.campaign.goals import nearest_enemy
 from module.campaign.map.map_state import GRID
 from module.campaign.navigation.ex_bypass import segment_clear
-from module.campaign.route_planning import ADVANCE_DISTANCE, route_enemy, route_enemy_candidates, route_path
+from module.campaign.route_planning import route_enemy, route_enemy_candidates, route_path
 from module.campaign.run_state import OBSERVED_CELL
 
 # 一个已观测粗格每边包含的 8 像素路网格数。
 CELLS = OBSERVED_CELL // GRID
+MIN_SCOUTED_STEP_DISTANCE = 60.
 
 
 def scouted_step_clear(state, cut, squad, step, route):
@@ -36,19 +37,21 @@ def scouted_step_clear(state, cut, squad, step, route):
 
 
 def confirmed_route_step(state, cut, squad, goal, pending):
-    """远处侦察有待复核时，只选当前路线上已确认的一小段路。
+    """前置侦察有待复核时，选疑点之前一段已确认的道路。
 
     落点必须在同一分区内且能从小队位置沿直线路面到达。已有敌人、历史线索或缺少安全
-    视野的道路仍要求按原路径复核；远处的侦察失败记录不清除。
+    视野的道路仍要求按原路径复核。疑点距离沿当前路线计算，即使离小队不足常规推进距离，
+    也可选尚未到达疑点的短移落点，侦察失败记录继续保留。
     """
     if (goal is None or goal.get('position') is None or goal['kind'] not in ('enemy', 'explore', 'story', 'advance')
-            or pending is None or pending['distance'] <= ADVANCE_DISTANCE):
+            or pending is None or pending['distance'] <= MIN_SCOUTED_STEP_DISTANCE):
         return None
     route = route_path(cut, squad, goal['position'])
     if route is None:
         return None
     path, distances = route
-    candidates = np.flatnonzero((distances >= 60.) & (distances <= 105.))
+    candidates = np.flatnonzero((distances >= MIN_SCOUTED_STEP_DISTANCE) & (distances <= 105.)
+                                & (distances < pending['distance']))
     for index in candidates[::-1]:
         point = path[index]
         identifier = f'advance-{goal["id"]}-{int(point[0])}-{int(point[1])}'
