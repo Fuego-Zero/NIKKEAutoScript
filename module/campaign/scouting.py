@@ -50,9 +50,17 @@ def confirmed_route_step(state, cut, squad, goal, pending):
     route = route_path(cut, squad, goal['position'])
     if route is None:
         return None
+    return confirmed_short_prefix(state, cut, squad, goal, route, pending['distance'])
+
+
+def confirmed_short_prefix(state, cut, squad, goal, route, stop_distance):
+    """在有限路程内选择同侧、可直线到达且已确认没有前置敌人的候选落点。
+
+    路径来自当前切开图，stop_distance 是沿路上限。复用同一落点门禁供远处敌人和待复核道路使用。
+    """
     path, distances = route
     candidates = np.flatnonzero((distances >= MIN_SCOUTED_STEP_DISTANCE) & (distances <= 105.)
-                                & (distances < pending['distance']))
+                                & (distances < stop_distance))
     for index in candidates[::-1]:
         point = path[index]
         identifier = f'advance-{goal["id"]}-{int(point[0])}-{int(point[1])}'
@@ -69,7 +77,8 @@ def far_enemy_approach(state, cut, squad, goal):
     """为超出常规镜头范围的普通敌人选择中途道路落点。
 
     镜头开销按底图直线距离判断，落点沿切开图的实际步行路程取一个常规推进段。
-    普通到点导航可沿道路绕过转角，因此只派发沿途已确认、无前置敌人的落点。
+    优先使用可直接投影的短移，避免连中途落点也耗尽镜头平移额度。直线不安全时，
+    用能沿道路绕过转角的普通到点导航，并保留沿途覆盖和敌人检查。
     通过中途落点后重新决策，保留远处敌人的未完成状态。
     """
     if (goal is None or goal['kind'] != 'enemy' or goal.get('enemy_kind') != 'normal'
@@ -79,6 +88,9 @@ def far_enemy_approach(state, cut, squad, goal):
     if route is None:
         return None
     path, distances = route
+    short = confirmed_short_prefix(state, cut, squad, goal, route, distances[-1])
+    if short is not None:
+        return short
     indices = np.flatnonzero((distances >= MIN_SCOUTED_STEP_DISTANCE) & (distances <= ADVANCE_DISTANCE))
     for index in indices[::-1]:
         point = path[index]
