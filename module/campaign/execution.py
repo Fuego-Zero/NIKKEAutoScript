@@ -353,6 +353,8 @@ class CampaignExecutor:
             kwargs['elevators'] = single_transfer_annotations(goal['leg'])
         progress_target = goal['leg']['entry'] if kind == 'elevator' else target
         self.session.begin_move_target(goal, progress_target)
+        self.session.last_stalled_enemy_camera = None
+        initial_squad_inputs = self.session.squad_inputs
         confirmed_transfers = []
 
         def progress(**values):
@@ -402,6 +404,15 @@ class CampaignExecutor:
             if kind == 'mechanism' and isinstance(exc, SquadOffscreen):
                 self.complete_mechanism(goal)
                 return
+            stalled_camera = self.session.last_stalled_enemy_camera
+            if (self.purpose == 'story' and kind == 'enemy' and stalled_camera is not None
+                    and self.session.squad_inputs == initial_squad_inputs
+                    and confirmed_route_step(
+                        self.owner.state, self.owner.cut, stalled_camera['squad'], goal, None,
+                        stalled_camera=stalled_camera)):
+                # 有可复核的前进路段，先按原恢复上限重新定位，再让主循环复核该路段。
+                logger.info(f'{goal_brief(goal)} 的镜头平移停滞，保留目标供恢复后复核短移。')
+                raise
             if kind == 'elevator':
                 self.owner.state.transfer_failed(goal['leg'])
             else:
