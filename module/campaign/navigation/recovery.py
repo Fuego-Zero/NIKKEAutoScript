@@ -50,6 +50,18 @@ def centered(evidence):
                 and np.linalg.norm(ground - goto.VIEWPORT_PIXEL) <= CENTER_TOLERANCE)
 
 
+def centered_compact_ring(evidence):
+    """返回镜头注视点附近的实测小队圆环，否则返回 None。
+
+    只用于已点击离屏小队图标、场景箭头暂缺的短移回正。环坐标属于归一化的紧凑面板；
+    调用方须用连续帧检查环未移动，之后仍需展开配准确认小队的底图坐标。
+    """
+    ring = np.asarray(evidence['ring'], float)
+    if evidence['offscreen'] is not None or ring.shape != (2,) or not np.isfinite(ring).all():
+        return None
+    return ring if np.linalg.norm(ring - goto.GAZE) <= 5. else None
+
+
 def recenter_mechanism_edge(session, mechanism_position):
     """已关联中央解锁光幕后，按机关位置与新视口给边缘小队执行一次有界镜头短拖。
 
