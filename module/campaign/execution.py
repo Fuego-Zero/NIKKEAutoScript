@@ -416,7 +416,8 @@ class CampaignExecutor:
                 raise
             return
         self.owner.state.execution_target = None
-        if result.get('state') != 'arrived':
+        passed_step = kind == 'advance' and goal.get('scouted_step') and result.get('state') == 'progressed'
+        if result.get('state') != 'arrived' and not passed_step:
             self.owner.state.record_failure(goal['for_target'] if kind == 'advance' else goal['id'])
             logger.warning(f"{goal_brief(goal)} 未确认触发：{describe_result(result)}；"
                            f"耗时 {watch}，本目标操作 {self.session.target_inputs} 次")

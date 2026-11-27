@@ -72,7 +72,7 @@ TARGET_SOURCES = {'annotation': '地图标注', 'scene_fallback': '场景识别�
 # 小队箭头锚点的取法。
 ANCHOR_METHODS = {'arrow_cycle': '箭头周期采样', 'minimap_ground_projection': '小地图地面投影'}
 # 移动结果的终态。
-RESULT_STATES = {'arrived': '已到点', 'needs_review': '已到附近但未确认触发'}
+RESULT_STATES = {'arrived': '已到点', 'progressed': '道路推进已确认', 'needs_review': '已到附近但未确认触发'}
 # 战斗接管的画面状态与最终结果。
 BATTLE_STATES = {'entry': '战斗准备弹窗', 'battle': '战斗中', 'victory': '胜利结算',
                  'defeat': '战败结算', 'continue': '继续提示', 'story': '剧情页面',
