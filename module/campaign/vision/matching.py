@@ -175,8 +175,8 @@ def iou_surface(target, road, valid, matrix, size):
     return np.clip(intersection / np.maximum(total + r.sum() - intersection, 1), 0, 1)
 
 
-def road_boundary_iou(terrain, road, valid, matrix):
-    """在候选落点的底图栅格复核道路，允许边界在双向各错开一个像素。
+def road_boundary_iou(terrain, road, valid, matrix, radius=1):
+    """在候选落点的底图栅格复核道路，radius 为允许的双向边界偏差（底图像素）。
 
     只在当前小地图的有效域内计数。双向都要找到对侧道路，不能凭较宽的一边吞掉缺失路段。
     """
@@ -193,7 +193,8 @@ def road_boundary_iou(terrain, road, valid, matrix):
     support = cv2.warpPerspective(valid, transform, size, flags=cv2.INTER_NEAREST) > 0
     observed = (cv2.warpPerspective(road, transform, size, flags=cv2.INTER_NEAREST) > 0) & support
     reference = (terrain[top:bottom, left:right] > 0) & support
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    diameter = 2 * radius + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (diameter, diameter))
     near_observed = cv2.dilate(observed.astype(np.uint8), kernel) > 0
     near_reference = cv2.dilate(reference.astype(np.uint8), kernel) > 0
     intersection = min(np.count_nonzero(observed & near_reference), np.count_nonzero(reference & near_observed))
@@ -246,20 +247,32 @@ class MapMatcher:
         self.local_margin = None
         self.local_steps = 0
 
-    def review_compact_boundary(self, result, road, valid):
+    def review_compact_boundary(self, result, road, valid, *, allow_wider=False):
         """只复核道路边界略低于门限、位置和尺度均明确的紧凑面板。
 
         原候选须先通过更严格的分差和离散度门限。复核在该候选上计分，不另行搜索位置，
-        返回值同时保留原始重合度供现场回放。
+        allow_wider 只用于能实测小队圆环的紧凑帧。两像素容差必须在周围栅格偏移上仍有独立分差，
+        避免用边界容差接受同一片道路上的不明确平移。返回值保留原始重合度供现场回放。
         """
-        if (result['status'] != 'needs_review'
-                or not ACCEPT_ROAD_IOU - .03 <= result['road_iou'] < ACCEPT_ROAD_IOU
-                or result['coarse_margin'] < .15 or result['parameter_spread_px'] > 12.):
+        if result['status'] != 'needs_review' or result['road_iou'] >= ACCEPT_ROAD_IOU:
             return result
-        overlap = road_boundary_iou(self.terrain, road, valid, np.asarray(result['roi_to_map'], float))
+        raw, margin, spread = (result[key] for key in ('road_iou', 'coarse_margin', 'parameter_spread_px'))
+        matrix = np.asarray(result['roi_to_map'], float)
+        if raw >= ACCEPT_ROAD_IOU - .03 and margin >= .15 and spread <= 12.:
+            overlap = road_boundary_iou(self.terrain, road, valid, matrix)
+            if overlap >= ACCEPT_ROAD_IOU:
+                return dict(result, status='accepted', boundary_road_iou=overlap)
+        if not allow_wider or raw < .65 or margin < .13 or spread > 8.:
+            return result
+        overlap = road_boundary_iou(self.terrain, road, valid, matrix, radius=2)
         if overlap < ACCEPT_ROAD_IOU:
             return result
-        return dict(result, status='accepted', boundary_road_iou=overlap)
+        for dx, dy in ((8, 0), (-8, 0), (0, 8), (0, -8), (8, 8), (8, -8), (-8, 8), (-8, -8)):
+            offset = np.array([[1., 0., dx], [0., 1., dy], [0., 0., 1.]])
+            nearby = road_boundary_iou(self.terrain, road, valid, offset @ matrix, radius=2)
+            if overlap - nearby < .035:
+                return result
+        return dict(result, status='accepted', boundary_road_iou=overlap, boundary_tolerance_px=2)
 
     def match(self, image, review=None):
         """粗搜索尺度和位移后细化最佳候选，以 IoU、远处候选分差及参数分散度联合决定是否接受。"""
