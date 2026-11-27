@@ -48,7 +48,8 @@ def panel_quad(snapshot, margin=0):
     面板是透视渲染的，四角投到底图后是个凸四边形而不是矩形（实测 38 章紧凑面板
     上沿约 700、下沿约 280 底图像素宽），所以「看过哪里」只能按这个四边形算，不能按半径。
     需要 accepted 定位给出的 roi_to_map 与面板尺寸，两者缺一不可。
-    margin 是投影前向内收缩的面板像素，用于排除敌人标记的截边与控件区域；收缩后为空则返回 None。
+    margin 排除实际面板边缘的截断标记与控件。局部配准仍在完整面板识别标记，所以先收缩面板，
+    再与可信配准范围求交。没有交集时返回 None。
     """
     matrix = snapshot.get('roi_to_map')
     minimap = snapshot.get('minimap')
@@ -56,10 +57,13 @@ def panel_quad(snapshot, margin=0):
         return None
     width, height = snapshot.get('coverage_size', minimap['size'])
     left, top, right, bottom = snapshot.get('coverage_bounds') or (0, 0, width, height)
-    if margin < 0 or min(right - left, bottom - top) <= 2 * margin:
+    if margin < 0:
         return None
-    corners = np.array([[left + margin, top + margin], [right - margin, top + margin],
-                        [right - margin, bottom - margin], [left + margin, bottom - margin]], float)
+    left, top = max(left, margin), max(top, margin)
+    right, bottom = min(right, width - margin), min(bottom, height - margin)
+    if left >= right or top >= bottom:
+        return None
+    corners = np.array([[left, top], [right, top], [right, bottom], [left, bottom]], float)
     matrix = np.asarray(matrix, float)
     points = np.column_stack((corners, np.ones(len(corners)))) @ matrix.T
     divisor = points[:, 2]
