@@ -9,7 +9,7 @@ from module.campaign.goals import describe, frontier_point, nearest_enemy, unobs
 from module.campaign.report import (BATTLE_OUTCOMES, BATTLE_STATES, EVIDENCE_KINDS, GOAL_KINDS, GOAL_REASONS,
                                     RESULT_STATES, label, points_text)
 from module.campaign.route_planning import planning_routes, route_path
-from module.campaign.scouting import confirmed_route_step, scout_focus
+from module.campaign.scouting import confirmed_route_step, far_enemy_approach, scout_focus
 from module.campaign.session import DEFEAT_BACK_POINT, DEFEAT_RETRY_POINT, SETTLE_TAP_INTERVAL
 from module.campaign.navigation.progress import NavigationStalled
 from module.campaign.timing import Stopwatch
@@ -1185,6 +1185,12 @@ class CampaignExecutor:
                                     'goal': goal, 'focus': pending}
                         logger.info(f"前置道路尚未确认（{pending['id']}），小队保持原位，下一轮继续侦察。")
                         continue
+                    if self.purpose == 'story' and located(snapshot) and snapshot.get('squad') is not None:
+                        step = far_enemy_approach(self.owner.state, self.owner.cut, snapshot['squad'], goal)
+                        if step is not None:
+                            logger.info(f"普通敌人 {goal['id']} 距离过远，先沿已确认道路前进至 "
+                                        f"{points_text(step['position'])}。")
+                            goal = step
                     if (goal is not None and goal['kind'] == 'enemy' and goal.get('enemy_kind') == 'boss'):
                         goal, snapshot = self.terminal_precheck(goal, snapshot)
                         if goal is None:
