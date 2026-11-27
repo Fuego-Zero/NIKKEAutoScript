@@ -807,6 +807,8 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         if (not inside(roi, (14, 14, 472, 448)) or not inside(click, FIELD_BOUNDS)
                 or (bounds is not None and not inside(roi, bounds))):
             raise ValueError('已确认道路短移的投影落点超出当前有效画面。')
+        destination = next((tuple(item['position']) for item in self.owner.state.confirmed_enemies()
+                            if item['id'] == goal.get('for_target') and item['kind'] == 'normal'), None)
         self.prepare_move_progress(observation, target, click)
         logger.info(f'按展开地图实测定位执行短移：小队 {points_text(squad)}，'
                     f'道路目标 {points_text(target)}，客户区落点 {points_text(click)}。')
@@ -825,6 +827,11 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         if remaining > goto.SQUAD_REACH_WIDE or span - remaining < 24.:
             if passed_scouted_waypoint(self.owner.cut, squad, target, position):
                 message = '停稳位置已通过短移点，下一轮从实测位置重新规划。'
+            elif destination is not None and passed_scouted_waypoint(
+                    self.owner.cut, squad, target, position, destination=destination):
+                self.record('scouted_step_passed_extended', goal=goal, start=squad.tolist(),
+                            waypoint=target.tolist(), position=position.tolist(), destination=destination)
+                message = '停稳位置超出短移点后确认更靠近原敌人，按实测位置重新规划。'
             elif (progress and progress['stage'] == 'route' and progress['progressed']
                   and np.array_equal(progress['checkpoint'], target)
                   and progress['previous_remaining'] - progress['remaining'] > goto.SQUAD_REACH):
