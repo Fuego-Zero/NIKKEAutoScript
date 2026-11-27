@@ -87,11 +87,12 @@ def confirmed_route_step(state, cut, squad, goal, pending):
     return None
 
 
-def passed_scouted_waypoint(cut, start, waypoint, position):
+def passed_scouted_waypoint(cut, start, waypoint, position, *, destination=None):
     """判断一次停稳实测是否沿当前可达道路通过了短移点，距离均为底图像素。
 
     只接受经过短移点一个路网格范围内、随后又前进至少一个到点容差的局部路线。
-    支路、折返、远离道路的终点以及超出一次短移范围的落点仍须进入普通恢复。
+    通过路点后的路程超过原 72 像素上限时，整段仍须在常规推进距离内，并且到本轮已确认的
+    原敌人的同路网步行距离至少缩短一个到点容差。无原目标、折返或改走无有效进展的支路仍需恢复。
     """
     route = route_path(cut, start, position)
     if route is None:
@@ -101,8 +102,16 @@ def passed_scouted_waypoint(cut, start, waypoint, position):
         return False
     gaps = np.linalg.norm(path - waypoint, axis=1)
     closest = int(np.argmin(gaps))
-    return bool(gaps[closest] <= GRID and distances[closest] <= 130.
-                and SQUAD_REACH <= distances[-1] - distances[closest] <= 72.)
+    passed = distances[-1] - distances[closest]
+    if gaps[closest] > GRID or distances[closest] > 130. or passed < SQUAD_REACH:
+        return False
+    if passed <= 72.:
+        return True
+    if destination is None or distances[-1] > ADVANCE_DISTANCE:
+        return False
+    before = route_path(cut, start, destination)
+    after = route_path(cut, position, destination)
+    return bool(before is not None and after is not None and before[1][-1] - after[1][-1] > SQUAD_REACH)
 
 
 def walking_field(cut, squad):
