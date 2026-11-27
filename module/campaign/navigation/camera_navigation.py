@@ -399,6 +399,7 @@ def compact_viewport(session, matcher, panel, road, valid):
     返回 dict(matrix, a, viewport, iou, status)，matrix 为面板→地图单应；失败抛 ValueError。
     """
     result = matcher.match_panel(panel, road, valid, np.array([panel.shape[1] / 2, panel.shape[0] / 2]))
+    result = matcher.review_compact_boundary(result, road, valid)
     matrix = np.asarray(result['roi_to_map'], float)
     return dict(matrix=matrix, a=float(result['a']), viewport=project(matrix, goto.GAZE),
                 iou=float(result['road_iou']), status=result['status'])
