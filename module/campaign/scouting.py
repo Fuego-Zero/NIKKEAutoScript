@@ -22,11 +22,18 @@ def scouted_step_clear(state, cut, squad, step, route):
     """核对短移的直线落点与沿途敌人，暂不可侦察的格仍需要实际覆盖。
 
     所有坐标为底图像素。短移使用直接投影落点，直线段的覆盖不能由相邻的 A* 网格替代。
+    圆环配准略落在底图道路边缘外时，仅允许采用半个路网格以内的 A* 起点复核直线；位于原道路
+    但被当前封锁切掉的点不在此列。实际坐标仍用于投影和敌人覆盖检查。
     路径上的既有敌人和历史线索仍由原侦察规则检查。
     """
     point = step['position']
     if not segment_clear(cut.road, squad, point):
-        return False
+        start = route[0][0]
+        x, y = np.rint(squad).astype(int)
+        height, width = cut.road.shape
+        if (np.linalg.norm(start - squad) > GRID / 2 or not (0 <= x < width and 0 <= y < height)
+                or cut.chart.road[y, x] or not segment_clear(cut.road, start, point)):
+            return False
     span = float(np.linalg.norm(np.subtract(point, squad)))
     samples = np.linspace(squad, point, max(2, int(np.ceil(span)) + 1))
     if not all(state.is_enemy_observed(sample) for sample in samples):
