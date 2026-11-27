@@ -270,12 +270,13 @@ def expanded_minimap_masks(panel, require_player=True, locate_player=True):
     return road, valid, player
 
 
-def match_squad_neighborhood(matcher, panel, expected_position):
+def match_squad_neighborhood(matcher, panel, expected_position, *, full_report=None):
     """将低重合度的展开图限制在新测小队圆环附近重配准，返回该范围内的证据。
 
     expected_position 必须是本次移动后已确认且仍有效的底图坐标。范围按原始展开 ROI 的像素给出，
     变换仍使用完整面板坐标系。较宽窗口有道路形状不一致时，可缩小到圆环附近的高置信区域。
-    两个窗口采用相同置信门限，圈外的道路和敌人不属于本次证据。
+    无小队约束的全图候选仍能对齐圆环时，额外复核两个偏向道路前方的局部窗口。
+    这两个窗口需要与全图候选在圆环周围多点一致。窗口外的道路和敌人不属于本次证据。
     """
     try:
         road, valid, player = expanded_minimap_masks(panel)
@@ -283,9 +284,21 @@ def match_squad_neighborhood(matcher, panel, expected_position):
         return None
     center_x, center_y = map(int, np.rint(player))
     height, width = panel.shape[:2]
-    for half_width, top_span, bottom_span in ((125, 115, 115), (85, 105, 65)):
-        left, top = max(4, center_x - half_width), max(4, center_y - top_span)
-        right, bottom = min(width - 4, center_x + half_width), min(height - 4, center_y + bottom_span)
+    windows = [(125, 125, 115, 115, .85), (85, 85, 105, 65, .85)]
+    reference = None
+    if (full_report is not None and 'expected_position' not in full_report
+            and full_report['road_iou'] >= .60 and full_report['coarse_margin'] >= .15
+            and full_report['parameter_spread_px'] <= 12.):
+        probes = (player + [[0, 0], [-55, -55], [55, -55], [-55, 25], [55, 25]]).tolist()
+        try:
+            reference = np.asarray(project_centers(probes, full_report['roi_to_map']))
+        except ValueError:
+            reference = None
+        if reference is not None and np.linalg.norm(reference[0] - expected_position) <= 12.:
+            windows.extend(((100, 160, 125, 35, .75), (160, 100, 125, 35, .75)))
+    for left_span, right_span, top_span, bottom_span, threshold in windows:
+        left, top = max(4, center_x - left_span), max(4, center_y - top_span)
+        right, bottom = min(width - 4, center_x + right_span), min(height - 4, center_y + bottom_span)
         local_road, local_valid = np.zeros_like(road), np.zeros_like(valid)
         area = np.s_[top:bottom, left:right]
         local_road[area], local_valid[area] = road[area], valid[area]
@@ -293,8 +306,20 @@ def match_squad_neighborhood(matcher, panel, expected_position):
             result = matcher.match_panel(panel, local_road, local_valid, player, expected_position=expected_position)
         except (ValueError, cv2.error):
             continue
-        if result['status'] == 'accepted' and result['road_iou'] >= .85:
-            return dict(result, coverage_bounds=[left, top, right, bottom])
+        if result['status'] != 'accepted' or result['road_iou'] < threshold:
+            continue
+        bounds = [left, top, right, bottom]
+        if threshold == .85:
+            return dict(result, coverage_bounds=bounds)
+        points = np.asarray(probes)
+        if np.any(points < [left, top]) or np.any(points >= [right, bottom]) or result['anchor_error'] > 8.:
+            continue
+        try:
+            projected = np.asarray(project_centers(probes, result['roi_to_map']))
+        except ValueError:
+            continue
+        if np.max(np.linalg.norm(projected - reference, axis=1)) <= 18.:
+            return dict(result, coverage_bounds=bounds, neighborhood_cross_checked=True)
     return None
 
 
