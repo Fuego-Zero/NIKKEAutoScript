@@ -745,18 +745,23 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
     def center_for_scouted_step(self):
         """短移前确认离屏图标点击后的镜头切换完成，避免用转场帧重新定位。
 
-        常规箭头回正已采样验证。离屏图标点击只代表已发送输入，等当前紧凑画面同时出现
-        居中箭头与小队圆环后才能展开地图。等待有上限，期间不补发点击。
+        橙色光圈站位可能没有场景箭头。此时须连续两帧取得注视点附近且稳定的紧凑圆环，返回末帧
+        圆环用于收图后复核。正常箭头回正返回 None。等待有上限，期间不补发点击。
         """
-        from module.campaign.navigation.recovery import centered, centering_frame, recenter_squad
+        from module.campaign.navigation.recovery import centered, centered_compact_ring, centering_frame, recenter_squad
 
         if not recenter_squad(self):
-            return
+            return None
         watch = Stopwatch()
+        previous = None
         while watch.seconds < 8.:
             evidence = centering_frame(self)
             if evidence['ring'] is not None and centered(evidence):
-                return
+                return None
+            ring = centered_compact_ring(evidence) if evidence['ground'] is None else None
+            if previous is not None and ring is not None and np.linalg.norm(ring - previous) <= 2.:
+                return ring
+            previous = ring
             self.pause(.4)
         raise ValueError('点击离屏小队图标后未确认镜头已居中，未发送短移。')
 
@@ -774,7 +779,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
 
         if self.ex_bypass.obstacles:
             raise ValueError('已确认道路短移前仍有 EX 避让任务，需重新规划。')
-        self.center_for_scouted_step()
+        verified_ring = self.center_for_scouted_step()
         self.localized_report = None
         observation = self.observe()
         if observation.get('player_roi') is None:
@@ -799,7 +804,17 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         field = self.win.client()
         self.identity(field)
         self.check_collectible(field)
-        anchor = resolve_anchor(self, field, observation, allow_scene=False)
+        if verified_ring is None:
+            anchor = resolve_anchor(self, field, observation, allow_scene=False)
+        else:
+            from module.campaign.navigation.recovery import centered_compact_ring, centering_frame
+
+            current = centered_compact_ring(centering_frame(self))
+            if current is None or np.linalg.norm(current - verified_ring) > 2.:
+                raise ValueError('收起地图后未重新确认小队居中，未发送短移。')
+            anchor = np.asarray(goto.VIEWPORT_PIXEL, float)
+            self.record('scouted_step_anchor', field=field, method='centered_compact_ring', ring=current.tolist())
+            logger.info('小队箭头缺失，已复核紧凑圆环居中，使用场景注视点作为短移地面基准。')
         chart = field_chart(self.localizer, observation, anchor)
         roi, click = target_projection(chart, observation, target)
         if (not inside(roi, (14, 14, 472, 448)) or not inside(click, FIELD_BOUNDS)
