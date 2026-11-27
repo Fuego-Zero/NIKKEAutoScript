@@ -221,7 +221,7 @@ class CampaignLocalizer:
         if (neighborhood_position is not None and report['status'] == 'needs_review'
                 and report['road_iou'] < ACCEPT_ROAD_IOU):
             from module.campaign.vision.perception import match_squad_neighborhood
-            local = match_squad_neighborhood(self.matcher, panel, neighborhood_position)
+            local = match_squad_neighborhood(self.matcher, panel, neighborhood_position, full_report=report)
             if local is not None:
                 report = local
                 if has_player:
