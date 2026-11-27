@@ -24,8 +24,9 @@ def supplemental_map(metadata):
 
 
 def supplemental_terrain_edits(metadata):
-    """返回小地图配准使用的道路补图，保留画面中叠在一起的跨层道路。"""
-    return supplemental_map(metadata).get('terrain_edits', [])
+    """返回配准共用补图和只用于匹配的轮廓修订，后者不参与可通行路网。"""
+    supplement = supplemental_map(metadata)
+    return [*supplement.get('terrain_edits', ()), *supplement.get('matching_terrain_edits', ())]
 
 
 def edited_roads(package, metadata, baseline=None, *, include_supplement=True):
