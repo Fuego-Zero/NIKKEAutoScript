@@ -43,12 +43,14 @@ def confirmed_route_step(state, cut, squad, goal, pending, *, stalled_camera=Non
     落点必须在同一分区内且能从小队位置沿直线路面到达。已有敌人、历史线索或缺少安全
     视野的道路仍要求按原路径复核。疑点距离沿当前路线计算，即使离小队不足常规推进距离，
     也可选尚未到达疑点的短移落点，侦察失败记录继续保留。连续两次可靠配准确认镜头未移动时，
-    原小队与普通敌人坐标仍一致才允许沿已核验路段靠近；落点须留出至少一个到点容差。
+    原小队坐标、目标坐标和敌人类型仍一致才允许沿已核验路段靠近。落点须留出至少一个到点容差。
     """
     if goal is None or goal.get('position') is None or goal['kind'] not in ('enemy', 'explore', 'story', 'advance'):
         return None
     if pending is None:
-        if (stalled_camera is None or goal['kind'] != 'enemy' or goal.get('enemy_kind') != 'normal'
+        if (stalled_camera is None or goal['kind'] != 'enemy'
+                or goal.get('enemy_kind') not in ('normal', 'boss')
+                or stalled_camera.get('enemy_kind', 'normal') != goal['enemy_kind']
                 or np.linalg.norm(np.subtract(stalled_camera['target'], goal['position'])) > 25.
                 or np.linalg.norm(np.subtract(stalled_camera['squad'], squad)) > 12.):
             return None

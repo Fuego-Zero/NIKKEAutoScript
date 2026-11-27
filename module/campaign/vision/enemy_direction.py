@@ -32,12 +32,13 @@ def match_target_direction(field, frame, matrix, target, squad, enemy_kind='norm
     """为已选底图敌人匹配同向脚圈，只返回点击落点，不选择或替换规划目标。
 
     frame 来自同帧 observe_rings，matrix 为已接受的紧凑面板到底图变换；target/squad 为底图像素。
+    Boss 传送台用居中的实测圆环和客户区标定方向独立核对，本帧只允许一个 Boss 标记。
     先沿用现有 30 地图像素范围与类别检查找到原目标标记，再反投影到小地图比较方向，
     不比较大小地图中的敌我距离。实景原点使用当前唯一箭头下移 90 客户区像素，离屏即拒绝。
     45 度内只有一个可点击脚圈且没有其他小地图敌人同向竞争时返回；否则继续原目标的导航，
     不按检测置信度、距离或检测顺序改点其他敌人。调用方仍须在点击前复核新帧。
     """
-    from module.campaign.navigation.controls import ARROW_GROUND_OFFSET
+    from module.campaign.navigation.controls import ARROW_GROUND_OFFSET, GAZE, VIEWPORT_PIXEL
     from module.campaign.vision.offscreen import squad_offscreen
     from module.campaign.vision.perception import squad_arrow
     from module.campaign.vision.surface_motion import project
@@ -61,6 +62,14 @@ def match_target_direction(field, frame, matrix, target, squad, enemy_kind='norm
     inverse = np.linalg.inv(np.asarray(matrix, float))
     origin = project(inverse, frame.squad[0])
     vectors = np.asarray([project(inverse, point) - origin for _, point in frame.enemies])
+    if frame.boss_pedestal:
+        from module.campaign.navigation.camera_navigation import panel_delta_to_client
+
+        if (enemy_kind != 'boss' or len(frame.enemies) != 1
+                or np.linalg.norm(origin - GAZE) > 5.):
+            return dict(reason='传送台缺少唯一 Boss 标记或居中的实测小队圆环。')
+        ground = np.asarray(VIEWPORT_PIXEL, float)
+        vectors = np.asarray([panel_delta_to_client(1., vectors[0])])
     scene_vectors = np.asarray(frame.centers) - ground
     target_index = nearby[0][0]
     indices = direction_candidates([vectors[target_index]], scene_vectors)
