@@ -65,6 +65,23 @@ def centered_compact_ring(evidence):
     return ring if np.linalg.norm(ring - goto.GAZE) <= 5. else None
 
 
+def verify_centered_compact_ring(session, evidence):
+    """按同一次会话的两帧紧凑小地图复核唯一圆环，只返回稳定的注视点附近圆环。
+
+    失败时保留最后一帧供调用方继续辨认箭头和离屏图标。圆环坐标为归一化面板像素；
+    镜头居中证据仍须结合之后新取得的小队地图定位使用。
+    """
+    ring = centered_compact_ring(evidence)
+    if ring is None:
+        return evidence, None
+    session.pause(VERIFY_INTERVAL)
+    checked = centering_frame(session)
+    checked_ring = centered_compact_ring(checked)
+    if checked_ring is not None and np.linalg.norm(checked_ring - ring) <= 2.:
+        return checked, checked_ring
+    return checked, None
+
+
 def recenter_mechanism_edge(session, mechanism_position):
     """已关联中央解锁光幕后，按机关位置与新视口给边缘小队执行一次有界镜头短拖。
 
@@ -110,7 +127,7 @@ def recenter_squad(session, mechanism_position=None, *, accept_centered_ring=Fal
     搜索时在场景安全区域按右、左、下、上长拖，途中不再按箭头微调；离屏图标出现后立即点击
     并直接视为回正成功，不再复核。普通回正不展开地图，定向搜索用尽后抛 ValueError。
     回正前先确认野外并收起大地图，待背景遮罩消退后用新帧核对章节，避免暗化角标造成 OCR 空结果。
-    accept_centered_ring 供随后还会实测定位的调用者使用：微调无效而箭头与紧凑圆环不一致时，
+    accept_centered_ring 供随后还会实测定位的调用者使用：箭头缺失或微调无效时，
     连续两帧圆环都接近注视点且稳定才接受视野。返回 True 表示使用离屏图标或此独立证据回正，
     不用箭头位置再次否决，调用方仍负责新的小队定位。
     全部输入经过原会话闸门，窗口、预算、取消及战斗异常不在此捕获。
@@ -142,6 +159,12 @@ def recenter_squad(session, mechanism_position=None, *, accept_centered_ring=Fal
                 logger.info(f"小队离屏图标已点击：客户区位置 {current['center']}，第 {clicks}/2 次。")
                 return True
             evidence = checked
+        if accept_centered_ring and evidence['ground'] is None:
+            evidence, ring = verify_centered_compact_ring(session, evidence)
+            if ring is not None:
+                session.record('recovery_centered_ring_no_arrow', force=True, drags=drags, ring=ring.tolist())
+                logger.info('小队箭头缺失，已连续两帧确认紧凑小队圆环在注视点附近。')
+                return True
         if not searching:
             if centered(evidence):
                 session.pause(VERIFY_INTERVAL)
@@ -172,16 +195,12 @@ def recenter_squad(session, mechanism_position=None, *, accept_centered_ring=Fal
                     if stalled_adjustments >= CENTER_STALL_LIMIT or adjustments >= CENTER_ADJUSTMENT_LIMIT:
                         searching = not centered(evidence)
                         if searching and accept_centered_ring:
-                            ring = centered_compact_ring(evidence)
+                            evidence, ring = verify_centered_compact_ring(session, evidence)
                             if ring is not None:
-                                session.pause(VERIFY_INTERVAL)
-                                evidence = centering_frame(session)
-                                checked_ring = centered_compact_ring(evidence)
-                                if checked_ring is not None and np.linalg.norm(checked_ring - ring) <= 2.:
-                                    session.record('recovery_centered_ring', force=True, adjustments=adjustments,
-                                                   ring=checked_ring.tolist())
-                                    logger.info('回正短拖未见效，已连续两帧确认紧凑小队圆环在注视点附近。')
-                                    return True
+                                session.record('recovery_centered_ring', force=True, adjustments=adjustments,
+                                               ring=ring.tolist())
+                                logger.info('回正短拖未见效，已连续两帧确认紧凑小队圆环在注视点附近。')
+                                return True
                         if searching:
                             logger.info(f'小队回正短拖连续无有效进展 {stalled_adjustments} 次，'
                                         f'累计微调 {adjustments} 次，转入定向搜索。')
