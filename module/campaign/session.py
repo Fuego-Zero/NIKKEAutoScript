@@ -745,12 +745,12 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
     def center_for_scouted_step(self):
         """短移前确认离屏图标点击后的镜头切换完成，避免用转场帧重新定位。
 
-        橙色光圈站位可能没有场景箭头。此时须连续两帧取得注视点附近且稳定的紧凑圆环，返回末帧
-        圆环用于收图后复核。正常箭头回正返回 None。等待有上限，期间不补发点击。
+        箭头缺失或镜头短拖无法使其回正时，须连续两帧取得注视点附近且稳定的紧凑圆环，
+        返回末帧圆环用于收图后复核。正常箭头回正返回 None。等待有上限，期间不补发点击。
         """
         from module.campaign.navigation.recovery import centered, centered_compact_ring, centering_frame, recenter_squad
 
-        if not recenter_squad(self):
+        if not recenter_squad(self, accept_centered_ring=True):
             return None
         watch = Stopwatch()
         previous = None
@@ -758,7 +758,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
             evidence = centering_frame(self)
             if evidence['ring'] is not None and centered(evidence):
                 return None
-            ring = centered_compact_ring(evidence) if evidence['ground'] is None else None
+            ring = centered_compact_ring(evidence)
             if previous is not None and ring is not None and np.linalg.norm(ring - previous) <= 2.:
                 return ring
             previous = ring
@@ -814,7 +814,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
                 raise ValueError('收起地图后未重新确认小队居中，未发送短移。')
             anchor = np.asarray(goto.VIEWPORT_PIXEL, float)
             self.record('scouted_step_anchor', field=field, method='centered_compact_ring', ring=current.tolist())
-            logger.info('小队箭头缺失，已复核紧凑圆环居中，使用场景注视点作为短移地面基准。')
+            logger.info('已复核紧凑小队圆环居中，使用场景注视点作为短移地面基准。')
         chart = field_chart(self.localizer, observation, anchor)
         roi, click = target_projection(chart, observation, target)
         if (not inside(roi, (14, 14, 472, 448)) or not inside(click, FIELD_BOUNDS)
@@ -1404,7 +1404,8 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         """独立回正小队并取得全新实测定位；失败时不把旧位置降级为可用。
 
         回正与重新定位各使用一个单目标输入窗口；前者不发送小队移动。
-        默认要求新快照来自实际小队圆环并通过既有配准门限；短拖回正后仍须居中，图标回正信任游戏结果。
+        默认要求新快照来自实际小队圆环并通过既有配准门限；箭头回正后仍须复核居中，
+        图标回正或普通恢复时的双帧紧凑圆环居中可独立确认视野。
         mechanism_position 仅供已确定中央解锁光幕的机关触发后回正，允许一次有界边缘小队镜头短拖；
         普通恢复不提供此参数；缺少画面标记时按既有定向搜索拖动，跳过小队避让但保留端点检查。
         allow_unlocalized 仅供执行层已通过近敌门禁的普通恢复使用：回正后只取单帧、不展开重试，
@@ -1418,7 +1419,8 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
 
         self.reset_navigation()
         self.begin_target('recovery')
-        icon_clicked = recenter_squad(self, mechanism_position=mechanism_position)
+        alternate_centered = recenter_squad(self, mechanism_position=mechanism_position,
+                                            accept_centered_ring=mechanism_position is None)
         self.reset_navigation()
         self.begin_target('position')
         snapshot = self.snapshot(retry_localization=not allow_unlocalized)
@@ -1427,7 +1429,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
                      and np.array_equal(np.asarray(snapshot.get('squad')), np.asarray(position)))
         if not allow_unlocalized and not confirmed:
             raise ValueError('小队回正后的实测定位未通过，不能恢复地图规划。')
-        if not icon_clicked and not centered(centering_frame(self)):
+        if not alternate_centered and not centered(centering_frame(self)):
             raise ValueError('重新定位后镜头偏离小队，不能恢复地图规划或实景近敌检查。')
         snapshot['recovery_position_confirmed'] = confirmed
         self.record('recovery_position_result', snapshot=snapshot, confirmed=confirmed)

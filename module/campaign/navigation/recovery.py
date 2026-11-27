@@ -14,6 +14,9 @@ from module.logger import logger
 RECOVERY_DRAGS = ((1100., 0.),) * 4 + ((-1100., 0.),) * 4 + ((0., 650.),) * 2 + ((0., -650.),) * 2
 CENTER_TOLERANCE = 50.
 GROUND_STABLE_TOLERANCE = 20.
+CENTER_MIN_PROGRESS = 12.
+CENTER_STALL_LIMIT = 2
+CENTER_ADJUSTMENT_LIMIT = 8
 VERIFY_INTERVAL = .4
 
 
@@ -53,7 +56,7 @@ def centered(evidence):
 def centered_compact_ring(evidence):
     """返回镜头注视点附近的实测小队圆环，否则返回 None。
 
-    只用于已点击离屏小队图标、场景箭头暂缺的短移回正。环坐标属于归一化的紧凑面板；
+    只用于图标回正后或短拖未能修正箭头位置时的独立复核。环坐标属于归一化的紧凑面板；
     调用方须用连续帧检查环未移动，之后仍需展开配准确认小队的底图坐标。
     """
     ring = np.asarray(evidence['ring'], float)
@@ -99,13 +102,17 @@ def recenter_mechanism_edge(session, mechanism_position):
     session.pause(1.2)
 
 
-def recenter_squad(session, mechanism_position=None):
+def recenter_squad(session, mechanism_position=None, *, accept_centered_ring=False):
     """短拖按箭头居中，长拖只用于寻找并点击离屏小队图标。
 
-    初始箭头可见时持续按地面点短拖，双帧均以箭头居中且位移不超过 20 像素为准。需要定向
+    初始箭头可见时按地面点短拖，双帧均以箭头居中且位移不超过 20 像素为准。短拖连续无效或
+    达到总次数上限后改为定向搜索，避免镜头到达地图边缘后反复拖同一方向。需要定向
     搜索时在场景安全区域按右、左、下、上长拖，途中不再按箭头微调；离屏图标出现后立即点击
     并直接视为回正成功，不再复核。普通回正不展开地图，定向搜索用尽后抛 ValueError。
     回正前先确认野外并收起大地图，待背景遮罩消退后用新帧核对章节，避免暗化角标造成 OCR 空结果。
+    accept_centered_ring 供随后还会实测定位的调用者使用：微调无效而箭头与紧凑圆环不一致时，
+    连续两帧圆环都接近注视点且稳定才接受视野。返回 True 表示使用离屏图标或此独立证据回正，
+    不用箭头位置再次否决，调用方仍负责新的小队定位。
     全部输入经过原会话闸门，窗口、预算、取消及战斗异常不在此捕获。
     仅机关触发后可提供 mechanism_position，在两种小队标记均缺失时按新配准的视野执行
     一次中央区域短拖；之后仍须恢复原视觉回正判据，不把投影位置直接当作小队定位。
@@ -120,6 +127,7 @@ def recenter_squad(session, mechanism_position=None):
         recenter_mechanism_edge(session, mechanism_position)
         evidence = centering_frame(session)
     clicks, adjustments, drags = 0, 0, 0
+    stalled_adjustments = 0
     searching = False
     while True:
         marker = evidence['offscreen']
@@ -155,6 +163,28 @@ def recenter_squad(session, mechanism_position=None):
                     pan_scene(session, offset * min(1., 560. / distance))
                     adjustments += 1
                     evidence = centering_frame(session)
+                    updated = evidence['ground']
+                    if (updated is not None
+                            and distance - np.linalg.norm(goto.VIEWPORT_PIXEL - updated) >= CENTER_MIN_PROGRESS):
+                        stalled_adjustments = 0
+                    else:
+                        stalled_adjustments += 1
+                    if stalled_adjustments >= CENTER_STALL_LIMIT or adjustments >= CENTER_ADJUSTMENT_LIMIT:
+                        searching = not centered(evidence)
+                        if searching and accept_centered_ring:
+                            ring = centered_compact_ring(evidence)
+                            if ring is not None:
+                                session.pause(VERIFY_INTERVAL)
+                                evidence = centering_frame(session)
+                                checked_ring = centered_compact_ring(evidence)
+                                if checked_ring is not None and np.linalg.norm(checked_ring - ring) <= 2.:
+                                    session.record('recovery_centered_ring', force=True, adjustments=adjustments,
+                                                   ring=checked_ring.tolist())
+                                    logger.info('回正短拖未见效，已连续两帧确认紧凑小队圆环在注视点附近。')
+                                    return True
+                        if searching:
+                            logger.info(f'小队回正短拖连续无有效进展 {stalled_adjustments} 次，'
+                                        f'累计微调 {adjustments} 次，转入定向搜索。')
                     continue
         if drags == len(RECOVERY_DRAGS):
             break
