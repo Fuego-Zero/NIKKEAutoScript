@@ -270,7 +270,7 @@ def expanded_minimap_masks(panel, require_player=True, locate_player=True):
     return road, valid, player
 
 
-def match_squad_neighborhood(matcher, panel, expected_position, *, tight=False):
+def match_squad_neighborhood(matcher, panel, expected_position, *, tight=False, window=None):
     """将低重合度的展开图限制在新测小队圆环附近重配准，返回该范围内的证据。
 
     expected_position 必须是本次观测的可靠位置候选或已确认位置。范围按原始展开 ROI 的像素给出，
@@ -280,9 +280,11 @@ def match_squad_neighborhood(matcher, panel, expected_position, *, tight=False):
         road, valid, player = expanded_minimap_masks(panel)
         center_x, center_y = map(int, np.rint(player))
         height, width = panel.shape[:2]
-        side, up, down = (85, 105, 65) if tight else (125, 115, 115)
-        left, top = max(4, center_x - side), max(4, center_y - up)
-        right, bottom = min(width - 4, center_x + side), min(height - 4, center_y + down)
+        if window is None:
+            window = (85, 85, 105, 65) if tight else (125, 125, 115, 115)
+        west, east, up, down = window
+        left, top = max(4, center_x - west), max(4, center_y - up)
+        right, bottom = min(width - 4, center_x + east), min(height - 4, center_y + down)
         local_road, local_valid = np.zeros_like(road), np.zeros_like(valid)
         area = np.s_[top:bottom, left:right]
         local_road[area], local_valid[area] = road[area], valid[area]
