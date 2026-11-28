@@ -20,9 +20,9 @@ from module.campaign.vision.story_marker import story_markers
 from module.campaign.vision.offscreen import squad_offscreen
 from module.campaign.vision.perception import (compact_road_masks, expanded_minimap_masks, marker_candidates,
                                              match_squad_neighborhood, minimap_masks, project_centers, refine_ring,
-                                             enemy_marker_conflicts)
+                                             enemy_marker_conflicts, review_chapter_40_south,
+                                             review_chapter_40_expanded, review_chapter_40_viewport)
 from module.logger import logger
-
 
 
 class CampaignObserver:
@@ -161,7 +161,8 @@ class CampaignObserver:
                     road, valid, player = expanded_minimap_masks(panel)
                 options = ({'expected_position': expected_squad}
                            if mode == 'expanded' and expected_squad is not None else {})
-            registration = self.locate(snapshot, chapter, panel, road, valid, player, enemies, **options)
+            registration = self.locate(snapshot, chapter, panel, road, valid, player, enemies,
+                                       compact_image=image if mode == 'compact' else None, **options)
             # 屏障投影链（barriers.scene_chart）按「紧凑面板 × a 后钉在展开 ROI 中心」标定，
             # 而展开形态的面板是原始展开 ROI 的坐标系，与那套标定不同源，
             # 直接把这份配准喂进去会让屏障落点整体偏。展开帧不标屏障，等下一次紧凑帧再标。
@@ -222,7 +223,7 @@ class CampaignObserver:
         return players, enemies
 
     def locate(self, snapshot, chapter, panel, road, valid, player, markers, expected_position=None,
-               known_squad=None):
+               known_squad=None, compact_image=None):
         """对一份已裁好的小地图面板做底图配准并把结果写进快照。
 
         panel/road/valid/player/markers 必须同属这一份面板的像素坐标系（紧凑与展开形态各调一次），
@@ -236,6 +237,13 @@ class CampaignObserver:
         """
         options = {'expected_position': expected_position} if expected_position is not None else {}
         result = self.matcher.match_panel(panel, road, valid, player, **options)
+        if chapter == 40 and snapshot['minimap']['mode'] == 'compact':
+            if known_squad is None:
+                result = review_chapter_40_south(self.matcher, panel, road, valid, player, result)
+            elif compact_image is not None:
+                result = review_chapter_40_viewport(self.matcher, compact_image, known_squad, result)
+        if chapter == 40 and snapshot['minimap']['mode'] == 'expanded' and expected_position is None:
+            result = review_chapter_40_expanded(self.matcher, panel, road, valid, player, result)
         anchor = expected_position if known_squad is None else known_squad
         if (anchor is not None and snapshot['minimap']['mode'] == 'expanded'
                 and result['status'] == 'needs_review' and result['road_iou'] < ACCEPT_ROAD_IOU):
@@ -248,6 +256,9 @@ class CampaignObserver:
         snapshot['localization_diagnostics'] = {
             name: result[name] for name in ('road_iou', 'coarse_margin', 'parameter_spread_px', 'anchor_error')
             if name in result}
+        for name in ('chapter_40_south_registration', 'chapter_40_ring_viewport', 'chapter_40_expanded_registration'):
+            if result.get(name):
+                snapshot['localization_diagnostics'][name] = True
         if result['status'] != 'accepted':
             failed = [name for name, passed in
                       (('road_iou', result['road_iou'] >= ACCEPT_ROAD_IOU),

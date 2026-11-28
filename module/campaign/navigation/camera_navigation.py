@@ -393,12 +393,16 @@ def fusion_acceptable(session, candidate, matrix, road, valid, origin, predicted
     return True
 
 
-def compact_viewport(session, matcher, panel, road, valid):
+def compact_viewport(session, matcher, panel, road, valid, *, field=None, squad_position=None):
     """紧凑面板的无种子视野定位：用道路配准。
 
     返回 dict(matrix, a, viewport, iou, status)，matrix 为面板→地图单应；失败抛 ValueError。
     """
     result = matcher.match_panel(panel, road, valid, np.array([panel.shape[1] / 2, panel.shape[0] / 2]))
+    if field is not None and squad_position is not None:
+        result = perception.review_chapter_40_viewport(matcher, field, squad_position, result)
+        if result.get('chapter_40_ring_viewport'):
+            session.emit(chapter_40_ring_viewport=True, chapter_40_road_iou=round(result['road_iou'], 3))
     matrix = np.asarray(result['roi_to_map'], float)
     return dict(matrix=matrix, a=float(result['a']), viewport=project(matrix, goto.GAZE),
                 iou=float(result['road_iou']), status=result['status'])
@@ -461,7 +465,8 @@ def prepare_compact_reference(session, matcher, start, squad_position, *, known_
     session.check_collectible(field)
     session.preview(field)
     panel, road, valid = perception.compact_road_masks(field)
-    current = compact_viewport(session, matcher, panel, road, valid)
+    current = compact_viewport(session, matcher, panel, road, valid,
+                                   field=field, squad_position=squad_position)
     if (current['status'] != 'accepted'
             or np.linalg.norm(current['viewport'] - start['viewport']) > 12
             or abs(current['a'] / start['a'] - 1.) > .12):
@@ -493,7 +498,8 @@ def confirm_ring_click(session, matcher, reference, field, viewport, scale_a, ta
     session.check_collectible(fresh)
     try:
         panel, road, valid = perception.compact_road_masks(fresh)
-        current = compact_viewport(session, matcher, panel, road, valid)
+        current = compact_viewport(session, matcher, panel, road, valid,
+                                   field=fresh, squad_position=squad_position)
         shift = float(np.linalg.norm(np.asarray(current['viewport']) - viewport))
         scale_change = abs(current['a'] / scale_a - 1.)
         if current['status'] != 'accepted':
@@ -585,7 +591,8 @@ def plan_world_move_compact(session, observation, target, max_pans=12, batch_lim
     if callable(camera_enemy_check):
         camera_enemy_check(field)
     panel, road, valid = perception.compact_road_masks(field)
-    start = compact_viewport(session, matcher, panel, road, valid)
+    start = compact_viewport(session, matcher, panel, road, valid,
+                                   field=field, squad_position=squad_position)
     if observation.get('squad_source') == 'known':
         if start['status'] != 'accepted':
             raise RuntimeError('找敌人后的当前镜头配准未通过，不能使用旧视野矩阵规划移动。')
@@ -717,7 +724,8 @@ def plan_world_move_compact(session, observation, target, max_pans=12, batch_lim
             chained = matrix @ np.array([[1., 0., -sx], [0., 1., -sy], [0., 0., 1.]])
         use_matrix, use_a, source = None, scale_a, 'chained'
         try:
-            candidate = compact_viewport(session, matcher, panel, road, valid)
+            candidate = compact_viewport(session, matcher, panel, road, valid,
+                                   field=field, squad_position=squad_position)
         except ValueError:
             candidate = None
         if candidate is not None:
