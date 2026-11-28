@@ -29,11 +29,12 @@ def supplemental_terrain_edits(metadata):
     return [*supplement.get('terrain_edits', ()), *supplement.get('matching_terrain_edits', ())]
 
 
-def edited_roads(package, metadata, baseline=None, *, include_supplement=True):
+def edited_roads(package, metadata, baseline=None, *, include_supplement=True, alternate_matching=False):
     """将 annotations.json 的人工道路操作应用于绑定的底图或给定 baseline。
 
     返回二值道路、覆盖掩码和仅由道路操作计算的哈希；1 表示擦除、2 表示补路，收集品修改不改变该哈希。
     补图在人工修订之前应用；配准可关闭它以核对尚未渲染平台的实时小地图。
+    特定区域的备用匹配补图仅由配准器显式启用，不改可行走道路。
     """
     package = Path(package)
     document = package / 'annotations.json'
@@ -42,7 +43,11 @@ def edited_roads(package, metadata, baseline=None, *, include_supplement=True):
         raise ValueError('Road edits belong to a different map')
     edits = annotations.get('terrain_edits', [])
     if include_supplement:
-        edits = [*supplemental_terrain_edits(metadata), *edits]
+        supplement = supplemental_terrain_edits(metadata)
+        if alternate_matching:
+            alternate = supplemental_map(metadata).get('alternate_matching', {})
+            supplement.extend(alternate.get('terrain_edits', ()))
+        edits = [*supplement, *edits]
     image, override = render_terrain(Image.open(package / 'map.png').convert('RGB'), edits, terrain_colors(metadata))
     override = np.asarray(override)
     if baseline is None:
