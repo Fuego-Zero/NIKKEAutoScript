@@ -9,7 +9,7 @@ import numpy as np
 from module.campaign.vision.detection import detect_minimap, detect_scene
 from module.campaign.vision.frame import frame_inputs
 from module.campaign.vision.minimap import terrain
-from module.campaign.vision.matching import ACCEPT_ROAD_IOU
+from module.campaign.vision.matching import ACCEPT_ROAD_IOU, MapMatcher
 
 
 CHAPTER_40_MAP_SHA256 = '1d9d06b2786a9108940dff36ec3c96e09fc3dc69833653b8e197f2e50ce108fe'
@@ -256,10 +256,16 @@ def review_chapter_40_south(matcher, panel, road, valid, player, full):
     弯道外围与中央道路的重合度不同。全图粗搜须先消除远处歧义，两个局部窗口再分别对齐。
     保留主窗口的覆盖范围，外围未通过复核的道路和敌人不能用于规划。
     """
-    if (matcher.digest != CHAPTER_40_MAP_SHA256 or panel.shape[:2] != (211, 218)
-            or full['status'] != 'needs_review' or full['search_scope'] != 'full'):
+    if matcher.digest != CHAPTER_40_MAP_SHA256 or panel.shape[:2] != (211, 218):
         return full
     x, y = full['position']
+    if 905. <= x <= 985. and 510. <= y <= 575.:
+        # 参数边缘命中也可能选中同一平台上的另一透视解，导致短移前的展开实测相差数个路网格。
+        if full['status'] == 'needs_review' or (full['road_iou'] < .74 and full['parameter_spread_px'] >= 22.):
+            return review_chapter_40_platform(matcher, panel, road, valid, player, full, expanded=False)
+        return full
+    if full['status'] != 'needs_review' or full['search_scope'] != 'full':
+        return full
     corridor = chapter_40_corridor((x, y))
     if not corridor and not (500. <= x <= 540. and 705. <= y <= 748.):
         return full
@@ -302,6 +308,9 @@ def match_chapter_40_windows(matcher, panel, road, valid, player, anchor, fallba
         local_road, local_valid = np.zeros_like(road), np.zeros_like(valid)
         local_road[window], local_valid[window] = road[window], valid[window]
         try:
+            if anchor is None:
+                matcher.warm_parameters = matcher.warm_center = None
+                matcher.local_steps = 0
             local = matcher.match_panel(panel, local_road, local_valid, player, expected_position=anchor)
             points = project_centers(probes, local['roi_to_map'])
         except (ValueError, cv2.error):
@@ -358,10 +367,13 @@ def review_chapter_40_expanded(matcher, panel, road, valid, player, full):
     避免把外围存在轮廓偏差的区域加入导航依据。
     """
     if (matcher.digest != CHAPTER_40_MAP_SHA256 or panel.shape[:2] != (462, 486)
-            or full['status'] != 'needs_review' or full['search_scope'] != 'full'
-            or full['parameter_spread_px'] > 10.):
+            or full['status'] != 'needs_review' or full['search_scope'] != 'full'):
         return full
     x, y = full['position']
+    if (895. <= x <= 988. and 471. <= y <= 575.) or (995. <= x <= 1138. and 510. <= y <= 568.):
+        return review_chapter_40_platform(matcher, panel, road, valid, player, full, expanded=True)
+    if full['parameter_spread_px'] > 10.:
+        return full
     if 420. <= x <= 540. and 670. <= y <= 748.:
         iou_floor, margin_floor = .56, .15
         windows = (((72, 115, 302, 325), .80), ((74, 145, 320, 366), .81))
@@ -378,6 +390,38 @@ def review_chapter_40_expanded(matcher, panel, road, valid, player, full):
     probes = (player + [[0, 0], [-28, -24], [28, -24], [-28, 24], [28, 24]]).tolist()
     result = match_chapter_40_windows(matcher, panel, road, valid, player, full['position'], full, windows, probes)
     return full if result is full else dict(result, chapter_40_expanded_registration=True)
+
+
+def review_chapter_40_platform(matcher, panel, road, valid, player, full, *, expanded):
+    """在 40-9 后平台上，分别全图配准两片保留转角的道路来消除相邻道路歧义。
+
+    靠近平台时，整幅小地图的其他分区会影响候选位置。两片局部道路都必须独立搜索并通过门限，
+    还须落在原候选附近。局部矩阵只用于本次回退和主窗口覆盖，不更新正常全图配准缓存。
+    """
+    eastern_view = expanded and full['position'][0] >= 995.
+    if eastern_view:
+        floor, margin = .65, .16
+    else:
+        floor, margin = (.61, .12) if expanded else (.66, .075)
+    if (full['road_iou'] < floor or full['coarse_margin'] < margin
+            or full['parameter_spread_px'] > 50.):
+        return full
+    if expanded:
+        if eastern_view:
+            windows = (((20, 195, 458, 350), .79), ((12, 181, 469, 361), .77), ((33, 201, 466, 414), .77))
+        else:
+            windows = (((20, 195, 458, 350), .79), ((61, 202, 466, 425), .79))
+        dx, dy = 28, 24
+    else:
+        windows = (((7, 72, 211, 193), .87), ((22, 55, 205, 157), .86), ((30, 46, 203, 172), .82))
+        dx, dy = 12, 12
+    probes = (player + [[0, 0], [-dx, -dy], [dx, -dy], [-dx, dy], [dx, dy]]).tolist()
+    fresh = MapMatcher(matcher.package)
+    result = match_chapter_40_windows(fresh, panel, road, valid, player, None, full, windows, probes)
+    if result is full or np.linalg.norm(np.subtract(result['position'], full['position'])) > 54.:
+        return full
+    key = 'chapter_40_expanded_registration' if expanded else 'chapter_40_platform_registration'
+    return dict(result, **{key: True})
 
 
 def expanded_minimap_masks(panel, require_player=True, locate_player=True):
