@@ -29,6 +29,7 @@ ACCEPT_ROAD_IOU = .70
 CHAPTER_39_MAP_SHA256 = '7222e53afb660e139961251a9d2d98c82aaff4a35667774c20b8e59252b41061'
 CHAPTER_39_EAST_SEED = (1072, 695)
 CHAPTER_39_EAST_BOUNDS = (1015., 625., 1165., 820.)
+CHAPTER_39_DECK_BOUNDS = (620., 680., 730., 810.)
 ACCEPT_COARSE_MARGIN = .10
 ACCEPT_PARAMETER_SPREAD_PX = 40
 # 已确认小队坐标对展开面板配准的约束半径，单位为章节底图像素。
@@ -262,7 +263,8 @@ class MapMatcher:
         """相邻区域不渲染时，允许对第 39 章的实测东侧道路独立复核。"""
         args = panel, road, valid, player, review, expected_position
         result = self._match_panel_with_retry(*args)
-        return self._review_chapter_39_east(result, args)
+        result = self._review_chapter_39_east(result, args)
+        return self._review_chapter_39_deck(result, args)
 
     def _review_chapter_39_east(self, result, args):
         """仅在原图候选能约束东侧区域时，用同样的门限复核实时地图。"""
@@ -284,6 +286,36 @@ class MapMatcher:
                 and np.linalg.norm(np.subtract(alternative['position'], result['position'])) <= 48.):
             return dict(alternative, chapter_39_east_registration=True)
         return result
+
+    def _review_chapter_39_deck(self, result, args):
+        """全图保留明确候选时，在第 39 章的重叠甲板区域独立确认圆环附近的道路。"""
+        panel, _, _, player, _, expected = args
+        if (not self.chapter_39_east_available or expected is not None or panel.shape[:2] != (462, 486)
+                or result['status'] != 'needs_review' or result['road_iou'] < .65
+                or result['coarse_margin'] < .15 or result['parameter_spread_px'] > 12.):
+            return result
+        left, top, right, bottom = CHAPTER_39_DECK_BOUNDS
+        x, y = result['position']
+        if not (left <= x <= right and top <= y <= bottom):
+            return result
+        from module.campaign.vision.perception import match_squad_neighborhood, project_centers
+
+        try:
+            local = match_squad_neighborhood(self, panel, result['position'], tight=True)
+            if (local is None or local['anchor_error'] > 8.
+                    or np.linalg.norm(np.subtract(local['player_center'], player)) > 2.):
+                return result
+            probes = np.asarray(player) + [[0, 0], [-48, -48], [48, -48], [-48, 48], [48, 48]]
+            xmin, ymin, xmax, ymax = local['coverage_bounds']
+            if np.any(probes < [xmin, ymin]) or np.any(probes >= [xmax, ymax]):
+                return result
+            full_points = project_centers(probes.tolist(), result['roi_to_map'])
+            local_points = project_centers(probes.tolist(), local['roi_to_map'])
+        except (ValueError, RuntimeError, cv2.error):
+            return result
+        if np.max(np.linalg.norm(np.subtract(local_points, full_points), axis=1)) > 18.:
+            return result
+        return dict(local, chapter_39_deck_neighborhood=True)
 
     def _match_panel_with_retry(self, panel, road, valid, player, review=None, expected_position=None):
         """连续帧先局部定位，失败后全图搜索平移，尺度仍不可信时最多补一次全参数搜索。
