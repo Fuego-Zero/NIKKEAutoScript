@@ -10,7 +10,9 @@ from module.campaign.report import (BATTLE_OUTCOMES, BATTLE_STATES, EVIDENCE_KIN
                                     RESULT_STATES, label, points_text)
 from module.campaign.route_planning import planning_routes, route_path
 from module.campaign.scouting import confirmed_route_step, far_enemy_approach, scout_focus
-from module.campaign.session import DEFEAT_BACK_POINT, DEFEAT_RETRY_POINT, SETTLE_TAP_INTERVAL
+from module.campaign.session import (
+    DEFEAT_BACK_POINT, DEFEAT_RETRY_POINT, SETTLE_TAP_INTERVAL, ScoutedStepStalled,
+)
 from module.campaign.navigation.progress import NavigationStalled
 from module.campaign.timing import Stopwatch
 from module.campaign.vision.battle import score_text, value_text
@@ -212,8 +214,10 @@ class CampaignExecutor:
         progress = self.session.active_movement_progress
         result = progress.last_result if progress is not None else None
         if (self.purpose != 'story' or goal is None or goal['kind'] in ('elevator', 'review_block')
-                or not result or result['stage'] != 'route' or result['progressed']
-                or result['failures'] < MAX_FAILURES):
+                or not result or result['stage'] != 'route' or result['progressed']):
+            return None
+        failures = max(result['failures'], result.get('scouted_stalls', 0))
+        if failures < MAX_FAILURES:
             return None
         self.session.check()
         state = self.owner.state
@@ -241,7 +245,7 @@ class CampaignExecutor:
         self.session.planned_enemy_click = None
         logger.warning(f"移动停滞推定光幕封锁：标注 {block['annotation_id']}，小队 {points_text(position)}，"
                        f"距封锁段 {block['assumed_distance']:.1f} 地图像素，"
-                       f"连续无进展 {result['failures']} 次；路网已更新，重新选择目标。")
+                       f"连续无进展 {failures} 次；路网已更新，重新选择目标。")
         return position
 
     def needs_expansion(self, goal, snapshot):
@@ -1251,6 +1255,11 @@ class CampaignExecutor:
                 except (RuntimeError, ValueError) as exc:
                     if self.purpose != 'story':
                         raise
+                    if isinstance(exc, ScoutedStepStalled):
+                        position = self.assume_stalled_barrier(goal)
+                        if position is not None:
+                            camera_options = {'known_squad': list(position)}
+                            continue
                     camera_options = {}
                     recovery_reason = str(exc)
                     self.session.record('recovery_required', force=True, reason=recovery_reason,
