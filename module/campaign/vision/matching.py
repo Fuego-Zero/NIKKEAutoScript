@@ -302,20 +302,37 @@ class MapMatcher:
 
         try:
             local = match_squad_neighborhood(self, panel, result['position'], tight=True)
-            if (local is None or local['anchor_error'] > 8.
+            wide_check = None
+            radius = 48.
+            if local is None and 670. <= x <= 715. and 754. <= y <= 795.:
+                # 弯道上的窄窗与向左倾斜的窗分别复核，两个窗都须稳定对齐。
+                local = match_squad_neighborhood(self, panel, result['position'], window=(72, 72, 70, 85))
+                wide_check = match_squad_neighborhood(self, panel, result['position'], window=(130, 80, 70, 90))
+                radius = 40.
+                if wide_check is None:
+                    return result
+            if (local is None or local['anchor_error'] > (12. if wide_check is not None else 8.)
                     or np.linalg.norm(np.subtract(local['player_center'], player)) > 2.):
                 return result
-            probes = np.asarray(player) + [[0, 0], [-48, -48], [48, -48], [-48, 48], [48, 48]]
+            probes = np.asarray(player) + [[0, 0], [-radius, -radius], [radius, -radius],
+                                           [-radius, radius], [radius, radius]]
             xmin, ymin, xmax, ymax = local['coverage_bounds']
             if np.any(probes < [xmin, ymin]) or np.any(probes >= [xmax, ymax]):
                 return result
             full_points = project_centers(probes.tolist(), result['roi_to_map'])
             local_points = project_centers(probes.tolist(), local['roi_to_map'])
+            if wide_check is not None:
+                xmin, ymin, xmax, ymax = wide_check['coverage_bounds']
+                if np.any(probes < [xmin, ymin]) or np.any(probes >= [xmax, ymax]):
+                    return result
+                wide_points = project_centers(probes.tolist(), wide_check['roi_to_map'])
+                if np.max(np.linalg.norm(np.subtract(local_points, wide_points), axis=1)) > 6.:
+                    return result
         except (ValueError, RuntimeError, cv2.error):
             return result
         if np.max(np.linalg.norm(np.subtract(local_points, full_points), axis=1)) > 18.:
             return result
-        return dict(local, chapter_39_deck_neighborhood=True)
+        return dict(local, chapter_39_deck_neighborhood=True, chapter_39_deck_corner=wide_check is not None)
 
     def _match_panel_with_retry(self, panel, road, valid, player, review=None, expected_position=None):
         """连续帧先局部定位，失败后全图搜索平移，尺度仍不可信时最多补一次全参数搜索。
