@@ -9,6 +9,8 @@ import numpy as np
 
 from module.base.timer import Timer
 from module.base.utils import publish_preview_frame
+from module.campaign.map.edited_map import road_distance
+from module.campaign.map.map_state import GRID
 from module.campaign.navigation import controls as goto
 from module.campaign.navigation.movement_feedback import SquadPositionChanged, TargetTriggered, collectible_indicator
 from module.campaign.navigation.pathfinding import NoConnectedRoad
@@ -634,7 +636,33 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         """
         return bool(battle.field_visible(field) or self.owner.minimap_expanded(field))
 
-    def observe(self):
+    def align_detour_registration(self, panel, report, compact_position):
+        """绕墙短移前，仅在两张新地图相差一到三个路网格且展开圆环偏出路面时复核。"""
+        from module.campaign.navigation.camera_navigation import CameraRegistrationError
+
+        original = report['position']
+        distance = np.linalg.norm(np.subtract(compact_position, original))
+        cut = self.owner.cut
+        if (not GRID < distance <= goto.SQUAD_REACH
+                or road_distance(cut.road, original) == 0
+                or road_distance(cut.road, compact_position) != 0):
+            return report
+        component = cut.component(compact_position)
+        if not component or cut.component(original) != component:
+            return report
+        try:
+            aligned = self.localizer.locate(panel, f'detour_{self.index:03}', expected_position=compact_position)
+        except (CameraRegistrationError, ValueError):
+            return report
+        squad = aligned['position']
+        if (np.linalg.norm(np.subtract(compact_position, squad)) > 2 * GRID
+                or road_distance(cut.road, squad) != 0 or cut.component(squad) != component):
+            return report
+        self.record('detour_compact_alignment', original=original, compact=compact_position, report=aligned)
+        logger.info(f'绕行短移重新配准展开地图：小队 {points_text(original)} → {points_text(squad)}。')
+        return aligned
+
+    def observe(self, *, align_detour=False):
         """优先复用未发生手势的有效小队定位，否则回正并展开定位，失败时有限换视野重试。
 
         每次尝试的失败原因与量化指标由观察器的告警给出，这里只在成功时补一行：接受了哪一次尝试、
@@ -648,8 +676,12 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         field = self.await_field()
         snapshot = self.remember_scene(field)
         nearby = self.stationary_squad()
-        if snapshot['localization'] == 'accepted' and (snapshot.get('minimap') or {}).get('mode') == 'compact':
+        compact_position = None
+        minimap = snapshot.get('minimap') or {}
+        if snapshot['localization'] == 'accepted' and minimap.get('mode') == 'compact':
             nearby = snapshot['squad']
+            if minimap.get('squad') is not None:
+                compact_position = nearby
         cached = self.reusable_report()
         if cached is not None:
             source = '紧凑小地图' if cached.get('minimap_mode') == 'compact' else '展开地图'
@@ -671,10 +703,12 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
                 self.record('localization_failed', field=self.trace.last_field, force=True,
                             attempt=attempt + 1, error=str(exc))
                 continue
-            self.record('localization_result', report=report, attempt=attempt + 1)
             self.check()
             if np.mean(terrain(panel) != terrain(self.win.capture())) > .03:
                 raise RuntimeError('定位期间道路还在变，不能用这次位置。')
+            if align_detour and compact_position is not None:
+                report = self.align_detour_registration(panel, report, compact_position)
+            self.record('localization_result', report=report, attempt=attempt + 1)
             matrix = np.asarray(report['roi_to_map'])
             report['enemy_markers'] = goto.normal_enemy_markers(panel, matrix, mode='expanded')
             from module.campaign.vision.perception import boss_enemy_markers
@@ -777,7 +811,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
             raise ValueError('已确认道路短移前仍有 EX 避让任务，需重新规划。')
         self.center_for_scouted_step()
         self.localized_report = None
-        observation = self.observe()
+        observation = self.observe(align_detour=bool(goal.get('detour_step')))
         if observation.get('player_roi') is None:
             raise ValueError('已确认道路短移前缺少本次展开地图的实测圆环。')
         squad = np.asarray(observation['position'], float)
