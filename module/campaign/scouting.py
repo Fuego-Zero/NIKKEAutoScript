@@ -10,6 +10,7 @@ from scipy.sparse.csgraph import dijkstra
 
 from module.campaign.goals import nearest_enemy
 from module.campaign.map.map_state import GRID
+from module.campaign.navigation.controls import SQUAD_REACH
 from module.campaign.navigation.ex_bypass import segment_clear
 from module.campaign.route_planning import ADVANCE_DISTANCE, route_enemy, route_enemy_candidates, route_path
 from module.campaign.run_state import OBSERVED_CELL
@@ -18,6 +19,7 @@ from module.campaign.run_state import OBSERVED_CELL
 CELLS = OBSERVED_CELL // GRID
 MIN_SCOUTED_STEP_DISTANCE = 60.
 FAR_ENEMY_DISTANCE = 3 * ADVANCE_DISTANCE
+MIN_DETOUR_STEP = SQUAD_REACH + 4.
 
 
 def scouted_step_clear(state, cut, squad, step, route):
@@ -53,20 +55,25 @@ def confirmed_route_step(state, cut, squad, goal, pending):
     return confirmed_short_prefix(state, cut, squad, goal, route, pending['distance'])
 
 
-def confirmed_short_prefix(state, cut, squad, goal, route, stop_distance):
+def confirmed_short_prefix(state, cut, squad, goal, route, stop_distance, *, detour=False):
     """在有限路程内选择同侧、可直线到达且已确认没有前置敌人的候选落点。
 
     路径来自当前切开图，stop_distance 是沿路上限。复用同一落点门禁供远处敌人和待复核道路使用。
     """
     path, distances = route
-    candidates = np.flatnonzero((distances >= MIN_SCOUTED_STEP_DISTANCE) & (distances <= 105.)
+    minimum = MIN_DETOUR_STEP if detour else MIN_SCOUTED_STEP_DISTANCE
+    candidates = np.flatnonzero((distances >= minimum) & (distances <= 105.)
                                 & (distances < stop_distance))
     for index in candidates[::-1]:
         point = path[index]
+        if detour and np.linalg.norm(point - squad) < minimum:
+            continue
         identifier = f'advance-{goal["id"]}-{int(point[0])}-{int(point[1])}'
         step = dict(kind='advance', id=identifier, position=point.tolist(),
                     distance=round(float(distances[index]), 1), reason='advance_on_route',
                     for_target=goal.get('for_target', goal['id']), scouted_step=True)
+        if detour:
+            step['detour_step'] = True
         if not state.is_unavailable(identifier) and scouted_step_clear(
                 state, cut, squad, step, (path[:index + 1], distances[:index + 1])):
             return step
@@ -74,21 +81,31 @@ def confirmed_short_prefix(state, cut, squad, goal, route, stop_distance):
 
 
 def far_enemy_approach(state, cut, squad, goal):
-    """为超出常规镜头范围的普通敌人选择中途道路落点。
+    """为镜头范围外或需要沿路绕行的普通敌人选择中途道路落点。
 
-    镜头开销按底图直线距离判断，落点沿切开图的实际步行路程取一个常规推进段。
-    优先使用可直接投影的短移，避免连中途落点也耗尽镜头平移额度。直线不安全时，
-    用能沿道路绕过转角的普通到点导航，并保留沿途覆盖和敌人检查。
+    镜头开销按底图直线距离判断。两端吸附到有效路网后，若直线经过至少一格宽的非道路区域，
+    则先沿已复核的直线路段短移，抵达弯道后重新决策。短移离最终敌人留有到点容差。
+    镜头范围外的敌人优先用同一短移；直线不安全时，继续尝试原有沿路中途落点。
     通过中途落点后重新决策，保留远处敌人的未完成状态。
     """
-    if (goal is None or goal['kind'] != 'enemy' or goal.get('enemy_kind') != 'normal'
-            or np.linalg.norm(np.subtract(goal['position'], squad)) <= FAR_ENEMY_DISTANCE):
+    if goal is None or goal['kind'] != 'enemy' or goal.get('enemy_kind') != 'normal':
         return None
     route = route_path(cut, squad, goal['position'])
     if route is None:
         return None
     path, distances = route
-    short = confirmed_short_prefix(state, cut, squad, goal, route, distances[-1])
+    direct = float(np.linalg.norm(np.subtract(goal['position'], squad)))
+    walking = distances[-1]
+    if direct <= FAR_ENEMY_DISTANCE:
+        start, end = path[0], path[-1]
+        count = 1 + int(np.linalg.norm(end - start))
+        line = np.rint(np.linspace(start, end, count)).astype(int)
+        gap = cut.road[line[:, 1], line[:, 0]] == 0
+        if not np.any(np.convolve(gap, np.ones(GRID, dtype=np.uint8), mode='valid') == GRID):
+            return None
+        return confirmed_short_prefix(state, cut, squad, goal, route, walking - SQUAD_REACH,
+                                      detour=True)
+    short = confirmed_short_prefix(state, cut, squad, goal, route, walking)
     if short is not None:
         return short
     indices = np.flatnonzero((distances >= MIN_SCOUTED_STEP_DISTANCE) & (distances <= ADVANCE_DISTANCE))

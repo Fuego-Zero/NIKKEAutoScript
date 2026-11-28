@@ -771,7 +771,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         )
         from module.campaign.navigation.movement_feedback import resolve_anchor
         from module.campaign.route_planning import route_path
-        from module.campaign.scouting import scouted_step_clear
+        from module.campaign.scouting import MIN_DETOUR_STEP, scouted_step_clear
 
         if self.ex_bypass.obstacles:
             raise ValueError('已确认道路短移前仍有 EX 避让任务，需重新规划。')
@@ -785,7 +785,8 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         span = float(np.linalg.norm(target - squad))
         state, cut = self.owner.state, self.owner.cut
         route = route_path(cut, squad, target)
-        if (not 40. <= span <= 125. or route is None or route[1][-1] > 130.
+        minimum = MIN_DETOUR_STEP if goal.get('detour_step') else 40.
+        if (not minimum <= span <= 125. or route is None or route[1][-1] > 130.
                 or not scouted_step_clear(state, cut, squad, goal, route)):
             raise ValueError('实测位置已改变或短移道路仍需复核，未发送移动。')
         goto.map_close(self.win)
