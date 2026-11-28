@@ -840,7 +840,9 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         )
         from module.campaign.navigation.movement_feedback import resolve_anchor
         from module.campaign.route_planning import route_path
-        from module.campaign.scouting import MIN_DETOUR_STEP, scouted_step_clear
+        from module.campaign.scouting import (
+            MIN_DETOUR_STEP, passed_scouted_waypoint, scouted_detour_can_use_camera, scouted_step_clear,
+        )
 
         if self.ex_bypass.obstacles:
             raise ValueError('已确认道路短移前仍有 EX 避让任务，需重新规划。')
@@ -855,24 +857,32 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         state, cut = self.owner.state, self.owner.cut
         route = route_path(cut, squad, target)
         minimum = MIN_DETOUR_STEP if goal.get('detour_step') else 40.
-        if (not minimum <= span <= 125. or route is None or route[1][-1] > 130.
-                or not scouted_step_clear(state, cut, squad, goal, route)):
+        straight = (minimum <= span <= 125. and route is not None and route[1][-1] <= 130.
+                    and scouted_step_clear(state, cut, squad, goal, route))
+        if not straight and not scouted_detour_can_use_camera(state, cut, squad, goal, route):
             raise ValueError('实测位置已改变或短移道路仍需复核，未发送移动。')
         goto.map_close(self.win)
-        field = self.win.client()
-        self.identity(field)
-        self.check_collectible(field)
-        anchor = resolve_anchor(self, field, observation, allow_scene=False)
-        chart = field_chart(self.localizer, observation, anchor)
-        roi, click = target_projection(chart, observation, target)
-        bounds = observation.get('coverage_bounds')
-        if (not inside(roi, (14, 14, 472, 448)) or not inside(click, FIELD_BOUNDS)
-                or (bounds is not None and not inside(roi, bounds))):
-            raise ValueError('已确认道路短移的投影落点超出当前有效画面。')
-        self.prepare_move_progress(observation, target, click)
-        logger.info(f'按展开地图实测定位执行短移：小队 {points_text(squad)}，'
-                    f'道路目标 {points_text(target)}，客户区落点 {points_text(click)}。')
-        self.record('scouted_step_click', field=field, goal=goal, squad=squad.tolist(), click=click.tolist())
+        if straight:
+            field = self.win.client()
+            self.identity(field)
+            self.check_collectible(field)
+            anchor = resolve_anchor(self, field, observation, allow_scene=False)
+            chart = field_chart(self.localizer, observation, anchor)
+            roi, click = target_projection(chart, observation, target)
+            bounds = observation.get('coverage_bounds')
+            if (not inside(roi, (14, 14, 472, 448)) or not inside(click, FIELD_BOUNDS)
+                    or (bounds is not None and not inside(roi, bounds))):
+                raise ValueError('已确认道路短移的投影落点超出当前有效画面。')
+            self.prepare_move_progress(observation, target, click)
+            logger.info(f'按展开地图实测定位执行短移：小队 {points_text(squad)}，'
+                        f'道路目标 {points_text(target)}，客户区落点 {points_text(click)}。')
+            self.record('scouted_step_click', field=field, goal=goal, squad=squad.tolist(), click=click.tolist())
+        else:
+            logger.info('短移前道路有转弯，改用镜头导航到原落点。')
+            click = self.plan(observation, target)
+            self.record('scouted_detour_camera', field=self.win.client(), goal=goal, squad=squad.tolist(),
+                        click=click.tolist(), target=target.tolist())
+        self.check()
         self.move(click)
         try:
             self.wait_stopped()
@@ -883,10 +893,13 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         self.review_scouted_stall(squad, target, progress)
         position = np.asarray(updated['position'], float)
         remaining = float(np.linalg.norm(position - target))
+        message = '沿已确认道路短移后重定位成功。'
         if remaining > goto.SQUAD_REACH_WIDE or span - remaining < 24.:
-            raise ValueError('已确认道路的短移未到达预期区域，需重新规划。')
+            if straight or not passed_scouted_waypoint(self.owner.cut, squad, target, position):
+                raise ValueError('已确认道路的短移未到达预期区域，需重新规划。')
+            message = '停稳位置已通过短移点，下一轮从实测位置重新规划。'
         self.finish_view()
-        return dict(state='arrived', message='沿已确认道路短移后重定位成功。',
+        return dict(state='arrived', message=message,
                     position=position.tolist(), movement_clicks=1, distance=remaining)
 
     def confirm_barriers(self, snapshot):
