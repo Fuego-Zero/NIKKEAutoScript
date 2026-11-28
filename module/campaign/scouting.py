@@ -39,6 +39,35 @@ def scouted_step_clear(state, cut, squad, step, route):
             and route_enemy(state, cut, squad, point, *route) is None)
 
 
+def scouted_detour_can_use_camera(state, cut, squad, step, route):
+    """短移直线被拐角截断时，仍须确认原落点的整段绕行道路和敌情。"""
+    if step['kind'] != 'advance' or not step.get('detour_step') or route is None:
+        return False
+    target = step['position']
+    path, distances = route
+    span = np.linalg.norm(np.subtract(target, squad))
+    return (MIN_DETOUR_STEP <= span <= 125. and distances[-1] <= 130.
+            and not segment_clear(cut.road, squad, target)
+            and all(state.is_enemy_observed(point) for point in path)
+            and route_scout_focus(state, cut, squad, step, include_unavailable=True) is None
+            and route_enemy(state, cut, squad, target, path, distances) is None)
+
+
+def passed_scouted_waypoint(cut, start, waypoint, position):
+    """停稳位置须沿当前可达道路通过路点一个网格内，且只在局部路段内继续推进。"""
+    route = route_path(cut, start, position)
+    if route is None:
+        return False
+    path, distances = route
+    if np.linalg.norm(path[-1] - position) > 2 * GRID:
+        return False
+    gaps = np.linalg.norm(path - waypoint, axis=1)
+    closest = int(np.argmin(gaps))
+    passed = distances[-1] - distances[closest]
+    return bool(gaps[closest] <= GRID and distances[closest] <= 130.
+                and SQUAD_REACH <= passed <= 72.)
+
+
 def confirmed_route_step(state, cut, squad, goal, pending):
     """前置侦察有待复核时，选疑点之前一段已确认的道路。
 
