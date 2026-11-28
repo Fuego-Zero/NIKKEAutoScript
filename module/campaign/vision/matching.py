@@ -24,6 +24,11 @@ MATCH_VERSION = 9
 # 0.71~0.84（ch38 实测 0.832 被 0.85 拒掉），把这些正确位置全判死代价太大；错位与歧义主要由
 # margin 与 parameter_spread 两道判据拦截，IoU 只作为「确实压在道路上」的下限。
 ACCEPT_ROAD_IOU = .70
+
+# 39 章东侧电梯分区的小地图不会显示相邻分区的道路。
+CHAPTER_39_MAP_SHA256 = '7222e53afb660e139961251a9d2d98c82aaff4a35667774c20b8e59252b41061'
+CHAPTER_39_EAST_SEED = (1072, 695)
+CHAPTER_39_EAST_BOUNDS = (1015., 625., 1165., 820.)
 ACCEPT_COARSE_MARGIN = .10
 ACCEPT_PARAMETER_SPREAD_PX = 40
 # 已确认小队坐标对展开面板配准的约束半径，单位为章节底图像素。
@@ -182,7 +187,7 @@ class MapMatcher:
     否则配准结果对应的是另一张图。
     """
 
-    def __init__(self, package):
+    def __init__(self, package, *, _chapter_39_east_only=False):
         """核对底图哈希、配准状态和缓存投影，再构建粗搜索与全分辨率搜索画布。"""
         self.package = Path(package)
         meta = json.loads((self.package / 'map.json').read_text(encoding='utf-8'))
@@ -202,6 +207,17 @@ class MapMatcher:
                 raise ValueError('Cached projection differs from map metadata.')
         from module.campaign.map.edited_map import edited_roads
         self.terrain, _, edits_digest = edited_roads(self.package, meta, self.terrain)
+        chapter_39 = meta.get('chapter') == 39 and self.digest == CHAPTER_39_MAP_SHA256
+        self.chapter_39_east_available = chapter_39 and not _chapter_39_east_only
+        self.chapter_39_east_matcher = None
+        if _chapter_39_east_only and chapter_39:
+            _, labels = cv2.connectedComponents(np.asarray(self.terrain, dtype=np.uint8), connectivity=8)
+            x, y = CHAPTER_39_EAST_SEED
+            component = labels[y, x]
+            if component == 0:
+                raise ValueError('第 39 章东侧配准锚点已不在道路内。')
+            self.terrain = labels == component
+            edits_digest += '-chapter-39-east-only'
         self.terrain = self.terrain.astype(np.float32)
         self.cache_digest = hashlib.sha256((self.cache_digest + edits_digest).encode()).hexdigest()
         if list(self.terrain.shape[::-1]) != meta['size']:
@@ -224,6 +240,8 @@ class MapMatcher:
         """粗搜索尺度和位移后细化最佳候选，以 IoU、远处候选分差及参数分散度联合决定是否接受。"""
         # Wiki 图片之间没有时序连续性，不能把上一张图的位置当作本张的局部搜索先验。
         self.warm_center, self.local_steps = None, 0
+        if self.chapter_39_east_matcher is not None:
+            self.chapter_39_east_matcher.warm_center, self.chapter_39_east_matcher.local_steps = None, 0
         cropped = None
         try:
             panel, road, valid, player = minimap_masks(image)
@@ -241,6 +259,33 @@ class MapMatcher:
         return result
 
     def match_panel(self, panel, road, valid, player, review=None, expected_position=None):
+        """相邻区域不渲染时，允许对第 39 章的实测东侧道路独立复核。"""
+        args = panel, road, valid, player, review, expected_position
+        result = self._match_panel_with_retry(*args)
+        return self._review_chapter_39_east(result, args)
+
+    def _review_chapter_39_east(self, result, args):
+        """仅在原图候选能约束东侧区域时，用同样的门限复核实时地图。"""
+        if (not self.chapter_39_east_available or result['status'] != 'needs_review'
+                or result['road_iou'] < .60 or result['coarse_margin'] < .12):
+            return result
+        left, top, right, bottom = CHAPTER_39_EAST_BOUNDS
+        x, y = result['position']
+        if not (left <= x <= right and top <= y <= bottom):
+            return result
+        try:
+            if self.chapter_39_east_matcher is None:
+                self.chapter_39_east_matcher = MapMatcher(self.package, _chapter_39_east_only=True)
+            alternative = self.chapter_39_east_matcher._match_panel_with_retry(*args)
+        except (ValueError, cv2.error):
+            return result
+        x, y = alternative['position']
+        if (alternative['status'] == 'accepted' and left <= x <= right and top <= y <= bottom
+                and np.linalg.norm(np.subtract(alternative['position'], result['position'])) <= 48.):
+            return dict(alternative, chapter_39_east_registration=True)
+        return result
+
+    def _match_panel_with_retry(self, panel, road, valid, player, review=None, expected_position=None):
         """连续帧先局部定位，失败后全图搜索平移，尺度仍不可信时最多补一次全参数搜索。
 
         面板尺寸变化、显式小队坐标约束和定位失败都会清除位置先验。局部结果必须沿用已验证的
