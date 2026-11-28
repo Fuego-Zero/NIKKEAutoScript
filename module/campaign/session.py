@@ -249,6 +249,10 @@ class CampaignLocalizer:
                     position_kind='squad' if has_player else 'viewport')
 
 
+class ScoutedStepStalled(ValueError):
+    """连续短移在同一地面路段停滞，允许执行层复核邻近光幕。"""
+
+
 class CampaignSession(CampaignBattleActions, NavigationSession):
     """任务 Device 上的会话，复用 NavigationSession 的 plan、停稳与收尾，不创建采集器窗口。"""
 
@@ -306,6 +310,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         self.last_enemy_click = None
         self.planned_movement_click = None
         self.movement_progress = {}
+        self.last_scouted_stall = None
         self.active_movement_progress = None
         self.collectible_mode = owner.config.task.command == 'auto_main_collectible'
         self.localizer.record = self.record
@@ -435,6 +440,36 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
             self.record('movement_progress', **result)
             logger.info(f"移动路线进展：阶段 {result['stage']}，剩余路程 {result['remaining']} 地图像素，"
                         f"有效推进 {result['progressed']}，连续无进展 {result['failures']} 次。")
+        return result
+
+    def review_scouted_stall(self, start, target, result):
+        """同一局部路段的连续实测停滞可累计，路点坐标和内部编号允许轻微变化。
+
+        必须对应连着发送的短移、小队仍停在起点附近，且封锁路网未变。固定比较第一次的起终点，
+        避免连续小偏差逐次累积到另一段道路。已有进展、到达近点和 EX 退出阶段都会重置。
+        """
+        previous, self.last_scouted_stall = self.last_scouted_stall, None
+        if not result or result['stage'] != 'route' or result['progressed'] or result['remaining'] is None:
+            return
+        stop = np.asarray(result['position'], float)
+        start, target = np.asarray(start, float), np.asarray(target, float)
+        tolerance = 2 * GRID
+        if (np.linalg.norm(stop - start) > tolerance
+                or np.linalg.norm(stop - target) <= goto.SQUAD_REACH_WIDE):
+            return
+        signature = self.owner.cut.signature
+        if (previous is None or self.squad_inputs != previous['input'] + 1
+                or signature != previous['signature']
+                or np.linalg.norm(start - previous['start']) > tolerance
+                or np.linalg.norm(stop - previous['start']) > tolerance
+                or np.linalg.norm(target - previous['target']) > tolerance):
+            previous = dict(start=start, target=target, signature=signature, count=0)
+        previous.update(input=self.squad_inputs, count=previous['count'] + 1)
+        if previous['count'] >= MAX_FAILURES:
+            result['scouted_stalls'] = previous['count']
+            self.record('scouted_step_stalled', start=start.tolist(), target=target.tolist(), **result)
+            raise ScoutedStepStalled(f"同一路段累计 {previous['count']} 次实测短移无进展。")
+        self.last_scouted_stall = previous
 
     def popup(self, field):
         """战斗闸门：弹窗、战斗中、结算与可跳过剧情都抛给执行层，接管之内放行按钮点击。
@@ -844,7 +879,8 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         except SquadOffscreen:
             self.center_for_scouted_step()
         updated = self.observe()
-        self.review_move_progress(updated)
+        progress = self.review_move_progress(updated)
+        self.review_scouted_stall(squad, target, progress)
         position = np.asarray(updated['position'], float)
         remaining = float(np.linalg.norm(position - target))
         if remaining > goto.SQUAD_REACH_WIDE or span - remaining < 24.:
