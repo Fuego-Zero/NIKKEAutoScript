@@ -13,6 +13,7 @@ from module.campaign.vision.matching import ACCEPT_ROAD_IOU
 
 
 CHAPTER_40_MAP_SHA256 = '1d9d06b2786a9108940dff36ec3c96e09fc3dc69833653b8e197f2e50ce108fe'
+CHAPTER_40_CORRIDOR_BOUNDS = (548., 642., 655., 704.)
 
 
 def crop_candidate(image, detection, margin=4):
@@ -242,6 +243,13 @@ def detect_markers(image, matrix, mode):
     return project_centers(players, matrix), project_centers(enemies, matrix)
 
 
+def chapter_40_corridor(position):
+    """判断配准是否落在 40-6 结束后的南侧连接路段内，坐标为底图像素。"""
+    x, y = position
+    left, top, right, bottom = CHAPTER_40_CORRIDOR_BOUNDS
+    return left <= x <= right and top <= y <= bottom
+
+
 def review_chapter_40_south(matcher, panel, road, valid, player, full):
     """在第 40 章南侧弯道，用两个窗口复核紧凑地图的圆环配准。
 
@@ -249,12 +257,15 @@ def review_chapter_40_south(matcher, panel, road, valid, player, full):
     保留主窗口的覆盖范围，外围未通过复核的道路和敌人不能用于规划。
     """
     if (matcher.digest != CHAPTER_40_MAP_SHA256 or panel.shape[:2] != (211, 218)
-            or full['status'] != 'needs_review' or full['search_scope'] != 'full'
-            or not .68 <= full['road_iou'] < ACCEPT_ROAD_IOU
-            or full['coarse_margin'] < .13 or full['parameter_spread_px'] > 9.):
+            or full['status'] != 'needs_review' or full['search_scope'] != 'full'):
         return full
     x, y = full['position']
-    if not (500. <= x <= 540. and 705. <= y <= 748.):
+    corridor = chapter_40_corridor((x, y))
+    if not corridor and not (500. <= x <= 540. and 705. <= y <= 748.):
+        return full
+    iou_floor, margin_floor, spread_limit = (.64, .10, 13.) if corridor else (.68, .13, 9.)
+    if (not iou_floor <= full['road_iou'] < ACCEPT_ROAD_IOU
+            or full['coarse_margin'] < margin_floor or full['parameter_spread_px'] > spread_limit):
         return full
     return match_chapter_40_compact_windows(matcher, panel, road, valid, player, full['position'], full)
 
@@ -262,9 +273,18 @@ def review_chapter_40_south(matcher, panel, road, valid, player, full):
 def match_chapter_40_compact_windows(matcher, panel, road, valid, player, anchor, fallback):
     """用南侧弯道的两份紧凑道路证据验证同帧小队附近的矩阵。"""
     probes = (player + [[0, 0], [-12, -12], [12, -12], [-12, 12], [12, 12]]).tolist()
-    windows = (((12, 34, 205, 130), .75), ((8, 18, 162, 151), .74), ((7, 17, 131, 148), .79))
+    corridor = chapter_40_corridor(anchor)
+    if corridor:
+        # 战后画面靠近平台，右侧弯道比画面左缘的平行道路提供更一致的几何证据。
+        windows = (((31, 43, 215, 169), .73), ((54, 42, 194, 161), .75), ((58, 61, 215, 163), .78))
+    else:
+        windows = (((12, 34, 205, 130), .75), ((8, 18, 162, 151), .74), ((7, 17, 131, 148), .79))
     result = match_chapter_40_windows(matcher, panel, road, valid, player, anchor, fallback, windows, probes)
-    return fallback if result is fallback else dict(result, chapter_40_south_registration=True)
+    if result is fallback:
+        return fallback
+    key = 'chapter_40_corridor_registration' if corridor else 'chapter_40_south_registration'
+    result[key] = True
+    return result
 
 
 def match_chapter_40_windows(matcher, panel, road, valid, player, anchor, fallback, windows, probes):
@@ -307,11 +327,15 @@ def review_chapter_40_viewport(matcher, image, known_squad, original):
     仅处理同一南侧区域。圆环重新投影须与未移动的小队坐标一致，本次矩阵再用于投影视口中心，
     原小队坐标继续由调用方提供。
     """
+    if matcher.digest != CHAPTER_40_MAP_SHA256 or original['status'] != 'needs_review':
+        return original
     x, y = known_squad
-    if (matcher.digest != CHAPTER_40_MAP_SHA256 or original['status'] != 'needs_review'
-            or not (500. <= x <= 540. and 705. <= y <= 748.)
-            or original['road_iou'] < .66 or original['coarse_margin'] < .12
-            or original['parameter_spread_px'] > 10.
+    corridor = chapter_40_corridor(known_squad)
+    if not corridor and not (500. <= x <= 540. and 705. <= y <= 748.):
+        return original
+    iou_floor, margin_floor, spread_limit = (.63, .10, 13.) if corridor else (.66, .12, 10.)
+    if (original['road_iou'] < iou_floor or original['coarse_margin'] < margin_floor
+            or original['parameter_spread_px'] > spread_limit
             or np.linalg.norm(np.subtract(original['position'], known_squad)) > 34.):
         return original
     try:
@@ -335,14 +359,23 @@ def review_chapter_40_expanded(matcher, panel, road, valid, player, full):
     """
     if (matcher.digest != CHAPTER_40_MAP_SHA256 or panel.shape[:2] != (462, 486)
             or full['status'] != 'needs_review' or full['search_scope'] != 'full'
-            or not .56 <= full['road_iou'] < ACCEPT_ROAD_IOU
-            or full['coarse_margin'] < .15 or full['parameter_spread_px'] > 10.):
+            or full['parameter_spread_px'] > 10.):
         return full
     x, y = full['position']
-    if not (420. <= x <= 540. and 670. <= y <= 748.):
+    if 420. <= x <= 540. and 670. <= y <= 748.:
+        iou_floor, margin_floor = .56, .15
+        windows = (((72, 115, 302, 325), .80), ((74, 145, 320, 366), .81))
+    elif 593. <= x <= 651. and 575. <= y <= 696.:
+        iou_floor, margin_floor = .55, .11
+        windows = (((149, 161, 463, 383), .79), ((154, 152, 414, 340), .79), ((175, 190, 478, 388), .83))
+    elif 735. <= x <= 834. and 594. <= y <= 641.:
+        iou_floor, margin_floor = .66, .13
+        windows = (((101, 124, 454, 367), .86), ((136, 155, 430, 380), .90), ((75, 149, 412, 405), .88))
+    else:
+        return full
+    if not iou_floor <= full['road_iou'] < ACCEPT_ROAD_IOU or full['coarse_margin'] < margin_floor:
         return full
     probes = (player + [[0, 0], [-28, -24], [28, -24], [-28, 24], [28, 24]]).tolist()
-    windows = (((72, 115, 302, 325), .80), ((74, 145, 320, 366), .81))
     result = match_chapter_40_windows(matcher, panel, road, valid, player, full['position'], full, windows, probes)
     return full if result is full else dict(result, chapter_40_expanded_registration=True)
 
