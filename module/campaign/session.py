@@ -219,6 +219,10 @@ class CampaignLocalizer:
         if not has_player:
             player = np.array(panel.shape[1::-1], float) / 2
         report = self.matcher.match_panel(panel, road, valid, player, **options)
+        if expected_position is None and report['status'] == 'needs_review':
+            from module.campaign.vision.perception import review_chapter_40_expanded
+
+            report = review_chapter_40_expanded(self.matcher, panel, road, valid, player, report)
         from module.campaign.vision.matching import ACCEPT_ROAD_IOU
         if (neighborhood_position is not None and report['status'] == 'needs_review'
                 and report['road_iou'] < ACCEPT_ROAD_IOU):

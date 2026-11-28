@@ -9,6 +9,10 @@ import numpy as np
 from module.campaign.vision.detection import detect_minimap, detect_scene
 from module.campaign.vision.frame import frame_inputs
 from module.campaign.vision.minimap import terrain
+from module.campaign.vision.matching import ACCEPT_ROAD_IOU
+
+
+CHAPTER_40_MAP_SHA256 = '1d9d06b2786a9108940dff36ec3c96e09fc3dc69833653b8e197f2e50ce108fe'
 
 
 def crop_candidate(image, detection, margin=4):
@@ -236,6 +240,111 @@ def detect_markers(image, matrix, mode):
         elif item.label in ('minimap_enemy_normal', 'minimap_enemy_ex', 'minimap_enemy_boss'):
             enemies.append(item.center)
     return project_centers(players, matrix), project_centers(enemies, matrix)
+
+
+def review_chapter_40_south(matcher, panel, road, valid, player, full):
+    """在第 40 章南侧弯道，用两个窗口复核紧凑地图的圆环配准。
+
+    弯道外围与中央道路的重合度不同。全图粗搜须先消除远处歧义，两个局部窗口再分别对齐。
+    保留主窗口的覆盖范围，外围未通过复核的道路和敌人不能用于规划。
+    """
+    if (matcher.digest != CHAPTER_40_MAP_SHA256 or panel.shape[:2] != (211, 218)
+            or full['status'] != 'needs_review' or full['search_scope'] != 'full'
+            or not .68 <= full['road_iou'] < ACCEPT_ROAD_IOU
+            or full['coarse_margin'] < .13 or full['parameter_spread_px'] > 9.):
+        return full
+    x, y = full['position']
+    if not (500. <= x <= 540. and 705. <= y <= 748.):
+        return full
+    return match_chapter_40_compact_windows(matcher, panel, road, valid, player, full['position'], full)
+
+
+def match_chapter_40_compact_windows(matcher, panel, road, valid, player, anchor, fallback):
+    """用南侧弯道的两份紧凑道路证据验证同帧小队附近的矩阵。"""
+    probes = (player + [[0, 0], [-12, -12], [12, -12], [-12, 12], [12, 12]]).tolist()
+    windows = (((12, 34, 205, 130), .75), ((8, 18, 162, 151), .74), ((7, 17, 131, 148), .79))
+    result = match_chapter_40_windows(matcher, panel, road, valid, player, anchor, fallback, windows, probes)
+    return fallback if result is fallback else dict(result, chapter_40_south_registration=True)
+
+
+def match_chapter_40_windows(matcher, panel, road, valid, player, anchor, fallback, windows, probes):
+    """在已收窄的底图坐标附近重配准两份道路，返回通过复核的当前帧矩阵。
+
+    anchor 来自全局首选候选或本轮未经移动的小队位置。只在两份新配准的位置和透视一致时采用主窗口。
+    """
+    for index, (bounds, minimum) in enumerate(windows):
+        left, top, right, bottom = bounds
+        if any(not (left <= px < right and top <= py < bottom) for px, py in probes):
+            if index == 0:
+                return fallback
+            continue
+        window = np.s_[top:bottom, left:right]
+        local_road, local_valid = np.zeros_like(road), np.zeros_like(valid)
+        local_road[window], local_valid[window] = road[window], valid[window]
+        try:
+            local = matcher.match_panel(panel, local_road, local_valid, player, expected_position=anchor)
+            points = project_centers(probes, local['roi_to_map'])
+        except (ValueError, cv2.error):
+            if index == 0:
+                return fallback
+            continue
+        if local['status'] != 'accepted' or local['road_iou'] < minimum:
+            if index == 0:
+                return fallback
+            continue
+        if index == 0:
+            primary, coverage, primary_points = local, list(bounds), points
+        elif np.max(np.linalg.norm(np.subtract(primary_points, points), axis=1)) <= 10.:
+            result = dict(primary, coverage_bounds=coverage, coarse_margin=fallback['coarse_margin'])
+            result.pop('anchor_error', None)
+            return result
+    return fallback
+
+
+def review_chapter_40_viewport(matcher, image, known_squad, original):
+    """十字扫描后的紧凑视野失配时，用当前圆环重新配准道路。
+
+    仅处理同一南侧区域。圆环重新投影须与未移动的小队坐标一致，本次矩阵再用于投影视口中心，
+    原小队坐标继续由调用方提供。
+    """
+    x, y = known_squad
+    if (matcher.digest != CHAPTER_40_MAP_SHA256 or original['status'] != 'needs_review'
+            or not (500. <= x <= 540. and 705. <= y <= 748.)
+            or original['road_iou'] < .66 or original['coarse_margin'] < .12
+            or original['parameter_spread_px'] > 10.
+            or np.linalg.norm(np.subtract(original['position'], known_squad)) > 34.):
+        return original
+    try:
+        panel, road, valid, ring = minimap_masks(image)
+        result = match_chapter_40_compact_windows(matcher, panel, road, valid, ring, known_squad, original)
+        if result is original or np.linalg.norm(np.subtract(result['position'], known_squad)) > 10.:
+            # 逐帧复核另一个可靠种子，防止窄搜索区边界排除弯道切线上的正确位置。
+            full = matcher.match_panel(panel, road, valid, ring)
+            result = review_chapter_40_south(matcher, panel, road, valid, ring, full)
+    except (ValueError, cv2.error):
+        return original
+    if result['status'] != 'accepted' or np.linalg.norm(np.subtract(result['position'], known_squad)) > 10.:
+        return original
+    return dict(result, chapter_40_ring_viewport=True)
+
+def review_chapter_40_expanded(matcher, panel, road, valid, player, full):
+    """在第 40 章南侧弯道复核展开面板的中央道路，供镜头和小队定位使用。
+
+    先要求展开全图筛出明确位置，再用两个窗口核对位置与透视。只标记主窗口内的地图覆盖，
+    避免把外围存在轮廓偏差的区域加入导航依据。
+    """
+    if (matcher.digest != CHAPTER_40_MAP_SHA256 or panel.shape[:2] != (462, 486)
+            or full['status'] != 'needs_review' or full['search_scope'] != 'full'
+            or not .56 <= full['road_iou'] < ACCEPT_ROAD_IOU
+            or full['coarse_margin'] < .15 or full['parameter_spread_px'] > 10.):
+        return full
+    x, y = full['position']
+    if not (420. <= x <= 540. and 670. <= y <= 748.):
+        return full
+    probes = (player + [[0, 0], [-28, -24], [28, -24], [-28, 24], [28, 24]]).tolist()
+    windows = (((72, 115, 302, 325), .80), ((74, 145, 320, 366), .81))
+    result = match_chapter_40_windows(matcher, panel, road, valid, player, full['position'], full, windows, probes)
+    return full if result is full else dict(result, chapter_40_expanded_registration=True)
 
 
 def expanded_minimap_masks(panel, require_player=True, locate_player=True):
