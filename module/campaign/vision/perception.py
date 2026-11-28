@@ -372,9 +372,14 @@ def review_chapter_40_expanded(matcher, panel, road, valid, player, full):
     x, y = full['position']
     if (895. <= x <= 988. and 471. <= y <= 575.) or (995. <= x <= 1138. and 510. <= y <= 568.):
         return review_chapter_40_platform(matcher, panel, road, valid, player, full, expanded=True)
-    if full['parameter_spread_px'] > 10.:
+    elevator_exit = 587. <= x <= 646. and 335. <= y <= 437.
+    if full['parameter_spread_px'] > (30. if elevator_exit else 10.):
         return full
-    if 420. <= x <= 540. and 670. <= y <= 748.:
+    if elevator_exit:
+        # 上层细长平台只用同一小队桥段的两份道路轮廓，避开与下层重合的面板边缘。
+        iou_floor, margin_floor = .60, .16
+        windows = (((119, 103, 311, 446), .75), ((117, 143, 370, 446), .73), ((104, 93, 339, 447), .74))
+    elif 420. <= x <= 540. and 670. <= y <= 748.:
         iou_floor, margin_floor = .56, .15
         windows = (((72, 115, 302, 325), .80), ((74, 145, 320, 366), .81))
     elif 593. <= x <= 651. and 575. <= y <= 696.:
