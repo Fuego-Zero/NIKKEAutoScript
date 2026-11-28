@@ -30,6 +30,7 @@ CHAPTER_39_MAP_SHA256 = '7222e53afb660e139961251a9d2d98c82aaff4a35667774c20b8e59
 CHAPTER_39_EAST_SEED = (1072, 695)
 CHAPTER_39_EAST_BOUNDS = (1015., 625., 1165., 820.)
 CHAPTER_39_DECK_BOUNDS = (620., 680., 730., 810.)
+CHAPTER_39_NORTH_BOUNDS = (520., 270., 595., 345.)
 ACCEPT_COARSE_MARGIN = .10
 ACCEPT_PARAMETER_SPREAD_PX = 40
 # 已确认小队坐标对展开面板配准的约束半径，单位为章节底图像素。
@@ -264,7 +265,8 @@ class MapMatcher:
         args = panel, road, valid, player, review, expected_position
         result = self._match_panel_with_retry(*args)
         result = self._review_chapter_39_east(result, args)
-        return self._review_chapter_39_deck(result, args)
+        result = self._review_chapter_39_deck(result, args)
+        return self._review_chapter_39_north(result, args)
 
     def _review_chapter_39_east(self, result, args):
         """仅在原图候选能约束东侧区域时，用同样的门限复核实时地图。"""
@@ -333,6 +335,39 @@ class MapMatcher:
         if np.max(np.linalg.norm(np.subtract(local_points, full_points), axis=1)) > 18.:
             return result
         return dict(local, chapter_39_deck_neighborhood=True, chapter_39_deck_corner=wide_check is not None)
+
+    def _review_chapter_39_north(self, result, args):
+        """北侧窄路的两块局部道路须吻合，同时排除全图粗搜的相似路段。"""
+        rivals = result.get('chapter_39_north_rivals')
+        if result['status'] != 'needs_review' or not rivals or len(rivals) > 3:
+            return result
+        panel, _, _, player, _, _ = args
+        from module.campaign.vision.perception import match_squad_neighborhood, project_centers
+
+        windows = ((105, 75, 85, 85), (95, 95, 75, 75))
+        try:
+            best, other = [match_squad_neighborhood(self, panel, result['position'], window=window)
+                           for window in windows]
+            if best is None or other is None or np.linalg.norm(np.subtract(best['player_center'], player)) > 2.:
+                return result
+            left, top = np.maximum(best['coverage_bounds'][:2], other['coverage_bounds'][:2])
+            right, bottom = np.minimum(best['coverage_bounds'][2:], other['coverage_bounds'][2:])
+            probes = np.asarray(player) + [[0, 0], [-40, -40], [40, -40], [-40, 40], [40, 40]]
+            if np.any(probes < [left, top]) or np.any(probes >= [right, bottom]):
+                return result
+            first = project_centers(probes.tolist(), best['roi_to_map'])
+            second = project_centers(probes.tolist(), other['roi_to_map'])
+            full = project_centers(probes.tolist(), result['roi_to_map'])
+            if (np.max(np.linalg.norm(np.subtract(first, second), axis=1)) > 9.
+                    or np.max(np.linalg.norm(np.subtract(first, full), axis=1)) > 18.):
+                return result
+            if any(match_squad_neighborhood(self, panel, rival, window=window) is not None
+                   for rival in rivals for window in windows):
+                return result
+        except (ValueError, RuntimeError, cv2.error):
+            return result
+        bounds = [int(left), int(top), int(right), int(bottom)]
+        return dict(best, coverage_bounds=bounds, chapter_39_north_registration=True)
 
     def _match_panel_with_retry(self, panel, road, valid, player, review=None, expected_position=None):
         """连续帧先局部定位，失败后全图搜索平移，尺度仍不可信时最多补一次全参数搜索。
@@ -526,6 +561,21 @@ class MapMatcher:
         margin = coarse[0]['score'] - max(alternatives, default=0)
         spread = max(np.linalg.norm(np.asarray(r['position']) - point) for r in candidates
                      if r['road_iou'] >= result['road_iou'] - .03)
+        left, top, right, bottom = CHAPTER_39_NORTH_BOUNDS
+        if (getattr(self, 'chapter_39_east_available', False) and not warm_hit and not local and expected is None
+                and panel.shape[:2] == (462, 486) and left <= point[0] <= right and top <= point[1] <= bottom
+                and result['road_iou'] >= ACCEPT_ROAD_IOU and .04 <= margin < ACCEPT_COARSE_MARGIN
+                and spread <= 12.):
+            nearby_scores = [(score, position) for item in coarse
+                             for score, position in ((item['score'], item['position']),
+                                                     (item['second'], item['second_position']))
+                             if score >= coarse[0]['score'] - ACCEPT_COARSE_MARGIN
+                             and np.linalg.norm(position - point) > 130.]
+            rivals = []
+            for _, position in sorted(nearby_scores, key=lambda item: item[0], reverse=True):
+                if all(np.linalg.norm(position - prior) > 24. for prior in rivals):
+                    rivals.append(position)
+            result['chapter_39_north_rivals'] = [position.tolist() for position in rivals]
         inside = np.all(point >= 0) and np.all(point <= np.asarray(self.terrain.shape[::-1]) - 1)
         # 参数邻域没有覆盖完整网格，只能沿用同参数的已接受全图分差；局部裁剪还会排除远处
         # 候选，所以只允许降低该分差，不能把窗口外的证据缺失算作置信度提升。
