@@ -164,8 +164,9 @@ class RunState:
         changes = {'observed_cells': self._absorb_observed(quad)}
         enemy_quad = panel_quad(snapshot, margin=ENEMY_VIEW_MARGIN)
         self._absorb_observed(enemy_quad, self.enemy_observed)
-        changes.update(self._absorb_enemies(snapshot.get('enemies') or [], enemy_quad))
         minimap = snapshot.get('minimap') or {}
+        changes.update(self._absorb_enemies(snapshot.get('enemies') or [], enemy_quad,
+                                            expanded=minimap.get('mode') == 'expanded'))
         if minimap.get('mode') == 'compact':
             changes.update(self._absorb_blocks(snapshot.get('blocks') or [], quad,
                                               can_clear=snapshot.get('barriers_observed', False),
@@ -204,12 +205,13 @@ class RunState:
         observed[inside] = 1
         return int(observed.sum()) - before
 
-    def _absorb_enemies(self, enemies, quad):
+    def _absorb_enemies(self, enemies, quad, *, expanded=False):
         """以本帧检测替换覆盖区域的确认结果，历史位置仅作为待复核线索。
 
         纯观测和补视野不推进决策拍，因此同一拍中不同视野的可靠检测可共同参与规划；下一拍
         未重新检出的普通敌人退为线索。quad 只包含排除边缘与控件后的可靠区域；
         区域内的漏检只撤销确认，不表示敌人已清除，贴边未检出不能记为已复核。
+        普通敌人在线索点两次进入可靠展开视野且都未检出后，暂停重复巡查，新的实际检出可重新激活。
         新检测点邻域内的旧确认也退为线索，以容忍视野边界的投影偏差；不会删掉相邻真实敌人。
         战斗敌人原位置仅检出重叠 EX 时属于分类歧义，保留待复核线索，不能据此改选无关区域。
         弹窗实际关联的 EX 位置可覆盖后续同位置的单帧战斗分类，不要求 EX 是移动目的地。
@@ -253,6 +255,7 @@ class RunState:
             observations.append((item, position))
         added, merged, assigned = [], 0, set()
         contour = np.asarray(quad, np.float32).reshape(-1, 1, 2) if quad is not None else None
+        expanded_center = np.mean(quad, axis=0) if expanded and quad is not None else None
         for record in self.enemies.values():
             record['visible'] = False
             covered = contour is not None and cv2.pointPolygonTest(contour, tuple(record['position']), False) >= 0
@@ -267,8 +270,24 @@ class RunState:
                                     for item, position in observations)
             if covered or nearby or contour is None:
                 record['confirmed_at'] = None
+            if ambiguous_ex:
+                record.pop('first_absent_view', None)
+                record.pop('expanded_absence_confirmed', None)
             if covered and not ambiguous_ex:
                 record['reviewed_at'] = self.tick
+                if (expanded_center is not None and record['kind'] == 'normal'
+                        and record['status'] == 'pending' and not record.get('classification_ambiguous')
+                        and not record.get('expanded_absence_confirmed') and not any(
+                            np.linalg.norm(position - record['position']) <= ENEMY_MERGE_RADIUS
+                            for _, position in observations)):
+                    first = record.get('first_absent_view')
+                    if first is None:
+                        record['first_absent_view'] = (self.tick, expanded_center.tolist())
+                    elif (first[0] != self.tick
+                          and np.linalg.norm(expanded_center - first[1]) >= OBSERVED_CELL):
+                        record['expanded_absence_confirmed'] = True
+                        record.pop('first_absent_view', None)
+                        logger.info(f"展开地图已从两处视野复核普通敌人线索 {record['id']} 缺席，等待新检出。")
         for item, position in observations:
             match = self._nearest_enemy(position, taken=assigned, kind=item.get('kind'))
             if match is None:
@@ -280,7 +299,10 @@ class RunState:
                 merged += 1
             assigned.add(match)
             ambiguous = item.get('classification_ambiguous', False)
-            self.enemies[match].update(position=position.tolist(), last_seen=self.tick,
+            record = self.enemies[match]
+            record.pop('first_absent_view', None)
+            record.pop('expanded_absence_confirmed', None)
+            record.update(position=position.tolist(), last_seen=self.tick,
                                       kind=item.get('kind') or self.enemies[match]['kind'],
                                       confirmed_at=None if ambiguous else self.tick,
                                       classification_ambiguous=ambiguous, reviewed_at=None, visible=True)
@@ -303,8 +325,8 @@ class RunState:
     def enemy_hints(self):
         """返回尚未复核的历史敌人位置，不作为可直接执行的战斗目标。
 
-        新可靠视野已覆盖而未检出的旧位置在本拍暂停复核，下一拍仍可重查；保留原记录，
-        不认定已清除。
+        新可靠视野已覆盖而未检出的旧位置在本拍暂停复核。普通敌人经两处可靠展开视野
+        复核缺席后，暂停基于旧位置巡查，仍保留记录并接受新的实际检出。
         与本拍同类确认点相邻的线索仅暂时隐藏，不能据此合并两只相邻敌人。
         这些线索不直接生成战斗目标；位于已选目标前置道路的线索须补视野复核，不能被远目标跳过。
         """
@@ -313,6 +335,7 @@ class RunState:
         return [record for record in self.enemies.values()
                 if record['status'] == 'pending' and record['id'] not in identifiers
                 and record.get('reviewed_at') != self.tick
+                and not record.get('expanded_absence_confirmed')
                 and not any(record['kind'] == current['kind']
                             and np.linalg.norm(np.asarray(record['position']) - current['position'])
                             <= ENEMY_HINT_RADIUS for current in confirmed)]
@@ -470,15 +493,16 @@ class RunState:
     def is_enemy_observed(self, point, enemy_id=None):
         """判断道路格是否可靠检查过敌人，或指定历史敌人是否已在本拍完成复核。
 
-        普通道路复用安全视野的覆盖记录；指定敌人则必须本拍重新检出、在安全视野中复核缺席，
-        或已经战斗清除。仅道路被扫描过、邻近敌人被检出和独立绑定目标均不能代替复核。
+        普通道路复用安全视野的覆盖记录；指定敌人可由本拍可靠观测、两处展开视野复核缺席，
+        或已确认战斗清除提供证据。仅道路覆盖、邻近敌人检出和独立绑定目标均不能代替复核。
         point 使用底图像素，缺失记录或越界位置返回 False。
         """
         if enemy_id is not None:
             record = self.enemies.get(enemy_id)
             return record is not None and (record['status'] == 'cleared'
                                            or record.get('confirmed_at') == self.tick
-                                           or record.get('reviewed_at') == self.tick)
+                                           or record.get('reviewed_at') == self.tick
+                                           or record.get('expanded_absence_confirmed', False))
         point = np.asarray(point, float)
         if point.shape != (2,) or not np.isfinite(point).all() or np.any(point < 0):
             return False
