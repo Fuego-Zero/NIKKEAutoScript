@@ -249,6 +249,16 @@ class CampaignLocalizer:
                     position_kind='squad' if has_player else 'viewport')
 
 
+def near_gaze_ring(evidence):
+    """有稳定偏移时，圆环只确认镜头已停稳，不能充当场景地面基准。"""
+    if evidence['offscreen'] is not None or evidence['ground'] is not None:
+        return None
+    ring = np.asarray(evidence['ring'], float)
+    if ring.shape != (2,) or not np.isfinite(ring).all():
+        return None
+    return ring if 5. < np.linalg.norm(ring - goto.GAZE) <= 16. else None
+
+
 class ScoutedStepStalled(ValueError):
     """连续短移在同一地面路段停滞，允许执行层复核邻近光幕。"""
 
@@ -814,18 +824,23 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
     def center_for_scouted_step(self):
         """短移前确认离屏图标点击后的镜头切换完成，避免用转场帧重新定位。
 
-        常规箭头回正已采样验证。离屏图标点击只代表已发送输入，等当前紧凑画面同时出现
-        居中箭头与小队圆环后才能展开地图。等待有上限，期间不补发点击。
+        常规箭头回正已采样验证。离屏图标点击后，须确认当前画面出现居中箭头和圆环，
+        或两帧圆环在注视点附近停稳。后者只用于进入展开实测定位及镜头导航。
         """
         from module.campaign.navigation.recovery import centered, centering_frame, recenter_squad
 
         if not recenter_squad(self):
             return
         watch = Stopwatch()
+        previous = None
         while watch.seconds < 8.:
             evidence = centering_frame(self)
             if evidence['ring'] is not None and centered(evidence):
-                return
+                return None
+            ring = near_gaze_ring(evidence)
+            if previous is not None and ring is not None and np.linalg.norm(ring - previous) <= 2.:
+                return ring
+            previous = ring
             self.pause(.4)
         raise ValueError('点击离屏小队图标后未确认镜头已居中，未发送短移。')
 
@@ -846,7 +861,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
 
         if self.ex_bypass.obstacles:
             raise ValueError('已确认道路短移前仍有 EX 避让任务，需重新规划。')
-        self.center_for_scouted_step()
+        camera_anchor = self.center_for_scouted_step() is not None
         self.localized_report = None
         observation = self.observe(align_detour=bool(goal.get('detour_step')))
         if observation.get('player_roi') is None:
@@ -862,7 +877,8 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         if not straight and not scouted_detour_can_use_camera(state, cut, squad, goal, route):
             raise ValueError('实测位置已改变或短移道路仍需复核，未发送移动。')
         goto.map_close(self.win)
-        if straight:
+        use_camera = not straight or camera_anchor
+        if not use_camera:
             field = self.win.client()
             self.identity(field)
             self.check_collectible(field)
@@ -878,9 +894,14 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
                         f'道路目标 {points_text(target)}，客户区落点 {points_text(click)}。')
             self.record('scouted_step_click', field=field, goal=goal, squad=squad.tolist(), click=click.tolist())
         else:
-            logger.info('短移前道路有转弯，改用镜头导航到原落点。')
+            if camera_anchor:
+                logger.info('离屏回正后的圆环已停稳但偏离注视点，改用镜头导航执行短移。')
+                event = 'scouted_offscreen_camera'
+            else:
+                logger.info('短移前道路有转弯，改用镜头导航到原落点。')
+                event = 'scouted_detour_camera'
             click = self.plan(observation, target)
-            self.record('scouted_detour_camera', field=self.win.client(), goal=goal, squad=squad.tolist(),
+            self.record(event, field=self.win.client(), goal=goal, squad=squad.tolist(),
                         click=click.tolist(), target=target.tolist())
         self.check()
         self.move(click)
@@ -895,7 +916,7 @@ class CampaignSession(CampaignBattleActions, NavigationSession):
         remaining = float(np.linalg.norm(position - target))
         message = '沿已确认道路短移后重定位成功。'
         if remaining > goto.SQUAD_REACH_WIDE or span - remaining < 24.:
-            if straight or not passed_scouted_waypoint(self.owner.cut, squad, target, position):
+            if not use_camera or not passed_scouted_waypoint(self.owner.cut, squad, target, position):
                 raise ValueError('已确认道路的短移未到达预期区域，需重新规划。')
             message = '停稳位置已通过短移点，下一轮从实测位置重新规划。'
         self.finish_view()
